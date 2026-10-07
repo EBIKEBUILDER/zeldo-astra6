@@ -60,10 +60,13 @@ Run this whenever you ship something worth showing.
 - Don't break the build. Run `npm run build` before pushing.
 - Don't commit secrets, API keys, or .env files.
 
-## 6. Automation (you don't need to remember)
+## 6. Hub Refresh (manual)
 
-A scheduled job checks all three repos every 6 hours. When it finds new commits,
-it automatically refreshes the patch notes on zeldo.site — no manual step needed.
-Just write good commit messages and push; the hub takes care of itself.
+After pushing changes worth showing, refresh zeldo.site:
 
-Screenshots still need a manual refresh after visual changes (they require local builds).
+```bash
+cd ~/workspace/zeldo-site && python3 auto-update.py
+```
+
+This pulls fresh patch notes from git history and redeploys the hub.
+Screenshots refresh too when local builds are available.
