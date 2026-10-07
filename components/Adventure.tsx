@@ -76,7 +76,7 @@ export default function Adventure() {
 
   return <div className="app-shell">
     <header className="site-header">
-      <a href="/" className="wordmark" aria-label="Moss and Ember home"><span className="brand-mark"><Icon name="flame" size={27} /></span><span>Moss <em>&</em> Ember<span className="brand-tagline">A LITTLE WORLD. A GRAND ADVENTURE.</span></span></a>
+      <a href="/" className="wordmark" aria-label="Zeldo home"><span className="brand-mark"><Icon name="flame" size={27} /></span><span>ZELDO<span className="brand-tagline">A LITTLE WORLD. A GRAND ADVENTURE.</span></span></a>
       <div className="header-right"><span className="edition">AN ORIGINAL POCKET ADVENTURE <span>№ 001</span></span><button className="text-button help-button" onClick={openHelp} aria-label="How to play"><Icon name="book" size={17} /><span>How to play</span></button><span className="header-divider" /><button className="text-button sound-button" onClick={() => controls.current?.mute()} disabled={!ready} aria-label={muted ? 'Unmute sound' : 'Mute sound'}><Icon name={muted ? 'mute' : 'sound'} size={18} /><span>Sound {muted ? 'off' : 'on'}</span></button></div>
     </header>
 
@@ -92,7 +92,7 @@ export default function Adventure() {
 
       {isTitle && <section className="title-content">
         <div className="eyebrow"><span className="tiny-line" /> A POCKET-SIZED ADVENTURE</div>
-        <h1>Moss <span className="ampersand">&</span><br /><em>Ember.</em></h1>
+        <h1>ZELDO</h1>
         <p className="title-story">Somewhere beyond the moss,<br />a little light is waiting.</p>
         <p className="title-description">A quiet valley. A forgotten shrine. One brave little soul.<br className="wide-break" /> Take your sword and see what lies beyond the trees.</p>
         <button className="primary-button begin-button" onClick={() => controls.current?.start()} disabled={!ready}><Icon name="sword" size={21} /><span>{ready ? 'Begin adventure' : 'Waking the valley…'}</span><Icon name="arrow" size={21} /></button>

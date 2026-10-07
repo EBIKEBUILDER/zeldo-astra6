@@ -68,5 +68,5 @@ export default function GameCanvas({ onReady }: { onReady: (controls: GameContro
     });
     return () => { disposed = true; cleanup?.(); };
   }, [onReady]);
-  return <><canvas ref={canvas} className="world-canvas" aria-label="Moss and Ember 3D adventure. Move with WASD or arrow keys, swing with Space, interact with E." tabIndex={0} />{error && <div className="render-error"><h2>The valley couldn’t wake up.</h2><p>{error}</p><p>Enable hardware acceleration or try another browser, then refresh.</p></div>}</>;
+  return <><canvas ref={canvas} className="world-canvas" aria-label="Zeldo 3D adventure. Move with WASD or arrow keys, swing with Space, interact with E." tabIndex={0} />{error && <div className="render-error"><h2>The valley couldn’t wake up.</h2><p>{error}</p><p>Enable hardware acceleration or try another browser, then refresh.</p></div>}</>;
 }
