@@ -1,4 +1,4 @@
-# Moss & Ember
+# ZELDO
 
 An original, low-poly pocket adventure built with Next.js App Router, React, TypeScript, Tailwind CSS, Babylon.js, Zustand, and the Web Audio API. Explore a mossy valley, cross the old bridge, and recover the last ember from a forgotten shrine.
 
