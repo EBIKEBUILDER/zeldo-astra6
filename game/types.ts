@@ -1,0 +1,16 @@
+export type Zone = 'overworld' | 'dungeon';
+export type Phase = 'title' | 'playing' | 'paused' | 'gameover' | 'victory';
+export type Point = { x: number; z: number };
+export type Obstacle = Point & { id: string; kind: 'tree' | 'rock' | 'hedge' | 'wall' | 'water'; w: number; d: number; scale?: number; rotation?: number };
+export type Decoration = Point & { kind: 'flower' | 'grass' | 'path' | 'bridge' | 'torch' | 'fence' | 'stump' | 'mushroom' | 'lily' | 'banner'; variant?: number; rotation?: number; w?: number; d?: number };
+export type WorldData = { width: number; height: number; obstacles: Obstacle[]; decorations: Decoration[]; spawn: Point; entrance: Point; exit: Point; key: Point; gate: Point; chest: Point };
+export type Player = Point & { vx: number; vz: number; facingX: number; facingZ: number; hp: number; maxHp: number; invulnerable: number; attackTime: number; attackCooldown: number; attackId: number; knockX: number; knockZ: number };
+export type Enemy = Point & { id: string; zone: Zone; kind: 'blob' | 'boss'; spawnX: number; spawnZ: number; hp: number; maxHp: number; radius: number; vx: number; vz: number; hitstun: number; flash: number; contactCooldown: number; respawn: number; lastAttackId: number; wanderAngle: number; mode: 'idle' | 'chase' | 'windup' | 'charge'; modeTime: number };
+export type Breakable = Point & { id: string; zone: Zone; kind: 'grass' | 'pot'; broken: boolean; lastAttackId: number };
+export type Pickup = Point & { id: string; zone: Zone; kind: 'rupee' | 'heart'; age: number; value: number };
+export type Particle = Point & { id: number; y: number; vx: number; vy: number; vz: number; life: number; maxLife: number; color: string; size: number; kind: 'spark' | 'debris' | 'poof' };
+export type SoundName = 'swing' | 'hit' | 'death' | 'rupee' | 'hurt' | 'key' | 'gate' | 'chest' | 'break' | 'heart' | 'step' | 'enter';
+export type SoundEvent = { id: number; name: SoundName };
+export type GameData = { phase: Phase; zone: Zone; player: Player; enemies: Enemy[]; breakables: Breakable[]; pickups: Pickup[]; particles: Particle[]; sounds: SoundEvent[]; elapsed: number; rupees: number; hasKey: boolean; gateOpen: boolean; bossDefeated: boolean; chestOpen: boolean; area: string; message: string; messageTime: number; shake: number; damageFlash: number; muted: boolean; seed: number; eventId: number; visited: string[] };
+export type InputState = { x: number; z: number; attack: boolean; interact: boolean };
+export type GameActions = { start: () => void; retry: () => void; toggleMute: () => void; togglePause: () => void; step: (dt: number, input: InputState) => void };
