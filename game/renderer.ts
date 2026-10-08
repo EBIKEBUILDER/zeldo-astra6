@@ -510,7 +510,7 @@ export function createGameRenderer(canvas: HTMLCanvasElement) {
       const enabled = enemy.zone === activeZone && enemy.hp > 0;
       model.node.setEnabled(enabled); if (!enabled) continue;
       model.node.position.set(enemy.x, Math.abs(Math.sin(time * (enemy.mode === 'chase' ? 10 : 3) + enemy.spawnX)) * .055, enemy.z);
-      const angle = Math.atan2(p.x - enemy.x, p.z - enemy.z);
+      const angle = enemy.kind === 'blob' ? Math.atan2(enemy.facingX, enemy.facingZ) : Math.atan2(p.x - enemy.x, p.z - enemy.z);
       model.node.rotation.y = angle;
       const bounce = Math.sin(time * (enemy.kind === 'boss' ? 7 : 5) + enemy.spawnX) * .035;
       model.body.scaling.y = (enemy.mode === 'windup' ? .57 : .73) + bounce;

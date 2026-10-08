@@ -10,7 +10,7 @@ const distance = (a: Point, b: Point) => Math.hypot(a.x-b.x,a.z-b.z);
 const clamp = (value: number, lo: number, hi: number) => Math.max(lo,Math.min(hi,value));
 
 function enemy(id: string, zone: Zone, x: number, z: number, boss = false): Enemy {
-  return { id,zone,x,z,spawnX:x,spawnZ:z,kind:boss?'boss':'blob',hp:boss?8:2,maxHp:boss?8:2,radius:boss?.83:.43,vx:0,vz:0,hitstun:0,flash:0,contactCooldown:0,respawn:0,lastAttackId:-1,wanderAngle:x*.7+z,mode:'idle',modeTime:(x+z)%2+1,path:[],repathTime:0,stuckTime:0,progressX:x,progressZ:z,rangedCooldown:0 };
+  return { id,zone,x,z,spawnX:x,spawnZ:z,kind:boss?'boss':'blob',hp:boss?8:2,maxHp:boss?8:2,radius:boss?.83:.43,vx:0,vz:0,facingX:Math.cos(x*.7+z),facingZ:Math.sin(x*.7+z),aggro:false,hitstun:0,flash:0,contactCooldown:0,respawn:0,lastAttackId:-1,wanderAngle:x*.7+z,mode:'idle',modeTime:(x+z)%2+1,path:[],repathTime:0,stuckTime:0,progressX:x,progressZ:z,rangedCooldown:0 };
 }
 export function createInitialData(muted = false): GameData {
   const p = WORLDS.overworld.spawn;
@@ -68,7 +68,7 @@ function move(s: GameData,p: Point,dx:number,dz:number,radius:number,obs:Obstacl
 function sanctuaryRepel(e: Enemy) {
   if(e.zone!=='overworld')return;
   const d=distance(e,SANCTUARY),minimum=SANCTUARY.radius+e.radius;
-  if(d<minimum) { const a=d>.001?Math.atan2(e.z-SANCTUARY.z,e.x-SANCTUARY.x):0;e.x=SANCTUARY.x+Math.cos(a)*minimum;e.z=SANCTUARY.z+Math.sin(a)*minimum;e.mode='idle'; }
+  if(d<minimum) { const a=d>.001?Math.atan2(e.z-SANCTUARY.z,e.x-SANCTUARY.x):0;e.x=SANCTUARY.x+Math.cos(a)*minimum;e.z=SANCTUARY.z+Math.sin(a)*minimum; }
 }
 function damagePlayer(s: GameData,source: Point,amount: number) {
   const p=s.player;
@@ -94,15 +94,15 @@ function navigationSpace(s: GameData,e: Enemy,obstacles: Obstacle[]): Navigation
 }
 function resetProgress(e: Enemy) {e.stuckTime=0;e.progressX=e.x;e.progressZ=e.z;}
 function clearPath(e: Enemy) {e.path=[];e.repathTime=0;}
-function pursue(e: Enemy,target: Point,speed: number,dt: number,space: NavigationSpace) {
+function followPath(e: Enemy,target: Point,speed: number,dt: number,space: NavigationSpace,mode: 'chase' | 'return' = 'chase') {
   // Keep open-ground steering responsive; A* is only needed when the direct
   // corridor is obstructed. The Guardian refreshes its route four times faster.
   if(isPathClear(e,target,e.radius,space))e.path=[{x:target.x,z:target.z}];
-  else if(e.mode!=='chase'||e.repathTime<=0) {
-    e.path=findPath(e,target,e.radius,space,PLAYER_RADIUS);
+  else if(e.mode!==mode||e.repathTime<=0) {
+    e.path=findPath(e,target,e.radius,space,mode==='chase'?PLAYER_RADIUS:0);
     e.repathTime=e.kind==='boss'?.18:.75;
   }
-  e.mode='chase';
+  e.mode=mode;
   while(e.path.length&&distance(e,e.path[0])<.09) {
     // A nearby corner can still be essential for a wide body to clear a pillar.
     // Reach it exactly unless cutting directly to the next segment is safe.
@@ -116,6 +116,18 @@ function pursue(e: Enemy,target: Point,speed: number,dt: number,space: Navigatio
   if(!isPathClear(e,next,e.radius,space)){e.repathTime=0;e.vx=0;e.vz=0;return;}
   const d=distance(e,next),travel=Math.min(speed,d/dt);
   e.vx=(next.x-e.x)/d*travel;e.vz=(next.z-e.z)/d*travel;
+}
+function faceMovement(e: Enemy,target: Point,dt: number) {
+  // Recoil never turns a monster backwards. Otherwise face the route being
+  // walked, or watch the hero while an aggressive monster waits for a route.
+  if(e.kind!=='blob'||e.hitstun>0)return;
+  const moving=Math.hypot(e.vx,e.vz)>.001;
+  if(!moving&&!e.aggro)return;
+  const desired=moving?Math.atan2(e.vx,e.vz):Math.atan2(target.x-e.x,target.z-e.z);
+  const current=Math.atan2(e.facingX,e.facingZ);
+  const turn=Math.atan2(Math.sin(desired-current),Math.cos(desired-current));
+  const angle=current+clamp(turn,-12*dt,12*dt);
+  e.facingX=Math.sin(angle);e.facingZ=Math.cos(angle);
 }
 function rangedFallback(s: GameData,e: Enemy,dt: number) {
   const pursuing=(e.mode==='chase'||e.mode==='charge')&&e.hitstun<=0&&e.hp>0&&s.gateOpen&&s.player.z>=15.1;
@@ -168,6 +180,7 @@ function attackTargets(s: GameData) {
     if(e.zone!==s.zone||e.hp<=0||e.lastAttackId===p.attackId||!swingHits(s,e,e.radius))continue;
     if(e.kind==='boss'&&(!s.gateOpen||p.z<15.1))continue;
     e.lastAttackId=p.attackId;e.hp--;e.flash=.15;e.hitstun=e.kind==='boss'?(e.mode==='charge'?.055:.1):.25;e.repathTime=0;
+    if(e.kind==='blob')e.aggro=true;
     const d=distance(e,p)||1,recoil=e.kind==='boss'?(e.mode==='charge'?1.8:3.7):7;
     e.vx=(e.x-p.x)/d*recoil;e.vz=(e.z-p.z)/d*recoil;
     // A hit briefly interrupts the Guardian's movement, but does not reset its
@@ -187,7 +200,11 @@ function attackTargets(s: GameData) {
 }
 function transition(s: GameData,zone: Zone,point: Point) {
   s.zone=zone;Object.assign(s.player,point,{vx:0,vz:0,knockX:0,knockZ:0,invulnerable:1.4,attackTime:0});s.particles=[];s.projectiles=[];s.shake=0;s.damageFlash=0;
-  for(const e of s.enemies) {clearPath(e);resetProgress(e);if(e.zone===zone)e.contactCooldown=Math.max(e.contactCooldown,1.1);}
+  for(const e of s.enemies) {
+    clearPath(e);resetProgress(e);
+    if(e.kind==='blob'){e.aggro=false;e.mode='idle';e.modeTime=0;e.vx=0;e.vz=0;}
+    if(e.zone===zone)e.contactCooldown=Math.max(e.contactCooldown,1.1);
+  }
   sound(s,'enter');message(s,zone==='dungeon'?'A little courage. A little light. Find the old brass key.':'Fresh air. The pines welcome you home.',4.5);
 }
 function quest(s: GameData,input: InputState) {
@@ -228,7 +245,7 @@ export function stepGame(previous: GameData,dt: number,input: InputState): GameD
     if(e.hp<=0) {
       if(e.kind==='boss')continue;
       e.respawn=Math.max(0,e.respawn-dt);
-      if(e.respawn===0&&(e.zone!==s.zone||distance(p,{x:e.spawnX,z:e.spawnZ})>3.5)){Object.assign(e,{x:e.spawnX,z:e.spawnZ,hp:e.maxHp,vx:0,vz:0,hitstun:0,flash:0,contactCooldown:1,lastAttackId:-1,mode:'idle',rangedCooldown:0});clearPath(e);resetProgress(e);}
+      if(e.respawn===0&&(e.zone!==s.zone||distance(p,{x:e.spawnX,z:e.spawnZ})>3.5)){Object.assign(e,{x:e.spawnX,z:e.spawnZ,hp:e.maxHp,vx:0,vz:0,aggro:false,hitstun:0,flash:0,contactCooldown:1,lastAttackId:-1,mode:'idle',rangedCooldown:0});clearPath(e);resetProgress(e);}
       continue;
     }
     if(e.zone!==s.zone)continue;
@@ -237,6 +254,9 @@ export function stepGame(previous: GameData,dt: number,input: InputState): GameD
     if(e.kind==='boss'&&(!s.gateOpen||p.z<15.1)){e.mode='idle';e.vx=0;e.vz=0;clearPath(e);continue;}
     const d=distance(e,p),inSanctuary=s.zone==='overworld'&&distance(p,SANCTUARY)<SANCTUARY.radius;
     const navigation=navigationSpace(s,e,obs);
+    // Detection acquires attention; distance, detours, and failed route attempts
+    // never release it. The safe clearing and world transitions do.
+    if(e.kind==='blob')e.aggro=!inSanctuary&&(e.aggro||d<5.7);
     if(e.hitstun<=0) {
       if(e.kind==='boss') {
         if(e.mode==='windup') {
@@ -254,17 +274,20 @@ export function stepGame(previous: GameData,dt: number,input: InputState): GameD
         }
         else if(e.mode==='idle'&&e.modeTime>0){e.vx*=Math.exp(-9*dt);e.vz*=Math.exp(-9*dt);}
         else if(d<5.6&&isPathClear(e,p,e.radius,navigation)){e.mode='windup';e.modeTime=.65;e.vx=0;e.vz=0;}
-        else pursue(e,p,2.65,dt,navigation);
-      // Going around a hedge can briefly increase distance to the hero. Keep
-      // an acquired target through that detour instead of turning back home.
-      } else if(!inSanctuary&&d<(e.mode==='chase'?9:5.7)) pursue(e,p,1.95,dt,navigation);
+        else followPath(e,p,2.65,dt,navigation);
+      } else if(e.aggro) followPath(e,p,1.95,dt,navigation);
+      else if(e.mode==='return'||distance(e,{x:e.spawnX,z:e.spawnZ})>2.1) {
+        const home={x:e.spawnX,z:e.spawnZ};
+        if(distance(e,home)>.15)followPath(e,home,.52,dt,navigation,'return');
+        else {e.mode='idle';e.modeTime=.7;e.vx=0;e.vz=0;}
+      }
       else {
         e.mode='idle';if(e.modeTime<=0){e.wanderAngle=random(s)*TAU;e.modeTime=1.2+random(s)*2;}
-        if(distance(e,{x:e.spawnX,z:e.spawnZ})>2.1)e.wanderAngle=Math.atan2(e.spawnZ-e.z,e.spawnX-e.x);
         e.vx=Math.cos(e.wanderAngle)*.52;e.vz=Math.sin(e.wanderAngle)*.52;
       }
     } else {e.vx*=Math.exp(-5*dt);e.vz*=Math.exp(-5*dt);}
-    if(e.mode!=='chase')clearPath(e);
+    if(e.mode!=='chase'&&e.mode!=='return')clearPath(e);
+    faceMovement(e,p,dt);
     move(s,e,e.vx*dt,e.vz*dt,e.radius,obs);sanctuaryRepel(e);if(e.kind==='boss')e.z=Math.max(15.5+e.radius,e.z);
   }
   // Several relaxed passes prevent a cluster from sharing a position while
