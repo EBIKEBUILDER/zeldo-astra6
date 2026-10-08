@@ -130,8 +130,18 @@ function completeAroundCorners(start: Point, goal: Point, radius: number, space:
   for (const point of gridRoute) add(point);
   const buffer = radius + CLEARANCE;
   for (const obstacle of space.obstacles) {
-    for (const x of [obstacle.x - obstacle.w / 2 - buffer, obstacle.x + obstacle.w / 2 + buffer]) {
-      for (const z of [obstacle.z - obstacle.d / 2 - buffer, obstacle.z + obstacle.d / 2 + buffer]) add({ x, z });
+    for (const sideX of [-1, 1]) for (const sideZ of [-1, 1]) {
+      const x = obstacle.x + sideX * obstacle.w / 2, z = obstacle.z + sideZ * obstacle.d / 2;
+      add({ x: x + sideX * buffer, z: z + sideZ * buffer });
+      // The comfort margin must not seal a gap the body can physically fit.
+      // Add a tighter corner only when a neighboring wall or world boundary
+      // blocks a buffered shoulder but leaves its nominal-radius counterpart
+      // usable. Ordinary routes retain their margin and compact search graph.
+      const tight = { x: x + sideX * radius, z: z + sideZ * radius };
+      const bufferedShoulders = [{ x: x + sideX * buffer, z }, { x, z: z + sideZ * buffer }];
+      const tightShoulders = [{ x: tight.x, z }, { x, z: tight.z }];
+      if (bufferedShoulders.some((point, i) => !isPathClear(point, point, radius, space) &&
+          isPathClear(tightShoulders[i], tightShoulders[i], radius, space))) add(tight);
     }
   }
   for (const exclusion of space.exclusions ?? []) {

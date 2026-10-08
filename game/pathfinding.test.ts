@@ -42,6 +42,22 @@ test('monster radius determines whether a narrow gate can be crossed', () => {
   assertClearRoute(start, bossRoute, .83, world);
 });
 
+for (const gap of [.86, .87]) {
+  test(`an off-grid ${gap}-wide passage remains usable without the optional clearance margin`, () => {
+    const center = 6.23, left = center - gap / 2, right = center + gap / 2;
+    const world = space([
+      wall('left', left / 2, 6, left, 1),
+      wall('right', (right + 14) / 2, 6, 14 - right, 1),
+    ]);
+    const start = { x: 2, z: 2 }, goal = { x: 10, z: 10 };
+    assert.ok(isPathClear({ x: center, z: 4 }, { x: center, z: 8 }, .43, world),
+      'The physical body fits through the passage');
+    const route = findPath(start, goal, .43, world);
+    assert.deepEqual(last(route), goal, 'An optional comfort margin must not turn a usable passage into a dead end');
+    assertClearRoute(start, route, .43, world);
+  });
+}
+
 test('diagonal routes cannot clip corners or tunnel through thin obstacles', () => {
   const world = space([wall('thin', 5, 5, .08, .08), wall('corner', 8, 8, 2, 2)]);
   const start = { x: 2, z: 2 }, goal = { x: 11, z: 10 };
