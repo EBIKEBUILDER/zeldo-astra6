@@ -1,6 +1,7 @@
 import * as B from '@babylonjs/core';
 import type { GameData, Zone, Obstacle, Decoration } from './types';
 import { WORLDS } from './world';
+import { getCameraFraming, getGameplayCameraTarget } from './camera';
 
 /** Babylon is deliberately a projection of the serializable simulation. */
 export function createGameRenderer(canvas: HTMLCanvasElement) {
@@ -481,12 +482,12 @@ export function createGameRenderer(canvas: HTMLCanvasElement) {
   let smoothGate = 0, smoothLid = 0;
   let lastPhase = '';
   let ambientTime = 0;
+  let framing = getCameraFraming(canvas.clientWidth, canvas.clientHeight);
   function resize() {
     engine.resize();
-    const aspect = engine.getRenderWidth() / Math.max(1, engine.getRenderHeight());
-    const halfH = aspect < 1 ? 10.3 : 9.5;
-    camera.orthoTop = halfH; camera.orthoBottom = -halfH;
-    camera.orthoLeft = -halfH * aspect; camera.orthoRight = halfH * aspect;
+    framing = getCameraFraming(canvas.clientWidth, canvas.clientHeight);
+    camera.orthoTop = framing.halfHeight; camera.orthoBottom = -framing.halfHeight;
+    camera.orthoLeft = -framing.halfWidth; camera.orthoRight = framing.halfWidth;
   }
   resize();
   function render(state: GameData, dt: number) {
@@ -501,9 +502,9 @@ export function createGameRenderer(canvas: HTMLCanvasElement) {
       hemisphere.groundColor = B.Color3.FromHexString(dungeon ? '#5b655d' : '#7b9876');
     }
     const title = state.phase === 'title';
-    const aspect = engine.getRenderWidth() / Math.max(1, engine.getRenderHeight());
-    const targetX = title ? p.x - (aspect > 1 ? 5.1 : 0) : state.zone === 'dungeon' ? 10 + (p.x - 10) * .27 : Math.max(7, Math.min(41, p.x));
-    const targetZ = title ? p.z + 3 : state.zone === 'dungeon' ? Math.max(6.0, Math.min(23.0, p.z + 1.9)) : Math.max(6.6, Math.min(23.0, p.z + 1.7));
+    const target = getGameplayCameraTarget(p, state.zone, framing);
+    const targetX = title ? p.x - (framing.aspect > 1 ? 5.1 : 0) : target.x;
+    const targetZ = title ? p.z + 3 : target.z;
     if (lastPhase === 'title' && !title) { cameraX = p.x; cameraZ = p.z + 1.7; }
     lastPhase = state.phase;
     const smoothing = 1 - Math.exp(-dt * 5);

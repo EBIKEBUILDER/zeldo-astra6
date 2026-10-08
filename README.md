@@ -33,7 +33,11 @@ npm test        # Deterministic simulation tests
 | Pause / resume | Escape or the pause button |
 | Mute / unmute | M or the sound button |
 
-Touch devices have directional, sword, and interaction buttons. Sword swings follow your facing direction. Hold attack for repeated swings; interaction requires a fresh press.
+On phones and tablets, drag the left joystick to move; a small tilt walks slowly. Hold the large **Sword** button with your other thumb to attack while moving. The nearby action button becomes **Enter**, **Leave**, **Inspect**, or **Open** when something is in reach. Sword swings follow your facing direction. Releasing a control, rotating the device, opening a menu, or switching apps safely clears held input.
+
+Use **Fullscreen** in the header to give the game the whole screen. The exit button stays beside Pause. On browsers without native fullscreen support, this still hides the site header and footer.
+
+The field HUD shows your hearts, rupees, current quest, and a live minimap with facing and objective markers. Tap the minimap to open a larger field map; tap **Satchel** to inspect your sword and quest items. Both menus pause the game and return you to the same adventure. Tap the quest card to see its milestones. Portrait and landscape layouts keep thumb controls clear of the central playfield.
 
 ## The adventure
 
@@ -57,7 +61,10 @@ Cut grass and break pots for rupees and healing hearts. Ordinary monsters return
 - `game/pursuit-memory.ts` retains aggression while monsters navigate and handles stalled pursuit recovery.
 - `game/store.ts` exposes that data and game actions through Zustand.
 - `game/renderer.ts` builds the Babylon scene and reads game data to update its meshes, camera, lighting, and effects. It does not advance gameplay.
-- `game/input.ts` combines keyboard, pointer, and touch input; interactions are consumed once per press.
+- `game/input.ts` combines keyboard, mouse, and analog touch input with a radial deadzone and normalized diagonals; short action taps survive between simulation ticks.
+- `game/camera.ts` keeps the hero in view on narrow screens and frames short landscape playfields.
+- `components/TouchControls.tsx` owns separate movement/attack pointers for two-thumb play.
+- `components/AdventureMap.tsx` and `components/QuestJournal.tsx` show the live map, objective markers, and quest milestones.
 - `game/audio.ts` synthesizes every sound with oscillators, noise, filters, and envelopes. Audio nodes are cleaned up after use.
 - `components/GameCanvas.tsx` runs the simulation at a fixed 60 Hz and renders independently with `requestAnimationFrame`.
 - `components/Adventure.tsx` contains the React HUD, map, quest hints, help, title, pause, and ending screens.

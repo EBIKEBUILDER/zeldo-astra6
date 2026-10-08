@@ -7,7 +7,18 @@ export type InputController = {
   clear: () => void;
   dispose: () => void;
   setVirtual: (action: VirtualAction, pressed: boolean) => void;
+  setMovement: (x: number, z: number) => void;
 };
+
+/** Radial deadzone keeps the stick still at rest without making diagonals faster. */
+export function normalizeMovement(x: number, z: number, deadzone = 0) {
+  if (!Number.isFinite(x) || !Number.isFinite(z)) return { x: 0, z: 0 };
+  const length = Math.hypot(x, z);
+  const threshold = Math.min(.95, Math.max(0, deadzone));
+  if (length <= threshold || length === 0) return { x: 0, z: 0 };
+  const strength = (Math.min(length, 1) - threshold) / (1 - threshold);
+  return { x: x / length * strength, z: z / length * strength };
+}
 
 const keyActions: Record<string, VirtualAction> = {
   KeyW: 'up', ArrowUp: 'up', KeyS: 'down', ArrowDown: 'down',
@@ -26,12 +37,16 @@ export function createInput(
   const keys = new Set<string>();
   const virtual = new Set<VirtualAction>();
   const pointers = new Set<number>();
+  let movement = { x: 0, z: 0 };
+  let attackPending = false;
   let interactPending = false;
 
   function clear() {
     keys.clear();
     virtual.clear();
     pointers.clear();
+    movement = { x: 0, z: 0 };
+    attackPending = false;
     interactPending = false;
   }
 
@@ -52,6 +67,7 @@ export function createInput(
     const action = keyActions[event.code];
     if (action) {
       event.preventDefault();
+      if (action === 'attack' && !event.repeat && !keys.has(event.code)) attackPending = true;
       if (action === 'interact' && !event.repeat && !keys.has(event.code)) {
         interactPending = true;
         onInteract?.();
@@ -73,9 +89,11 @@ export function createInput(
   }
 
   function pointerdown(event: PointerEvent) {
-    if (event.button !== 0) return;
+    // Touch movement/actions belong to the mobile controls, never the world canvas.
+    if (event.pointerType === 'touch' || event.button !== 0) return;
     event.preventDefault();
     pointers.add(event.pointerId);
+    attackPending = true;
     canvas.setPointerCapture(event.pointerId);
   }
 
@@ -91,6 +109,7 @@ export function createInput(
   window.addEventListener('keydown', keydown);
   window.addEventListener('keyup', keyup);
   window.addEventListener('blur', clear);
+  window.addEventListener('resize', clear);
   document.addEventListener('visibilitychange', visibility);
   canvas.addEventListener('pointerdown', pointerdown);
   canvas.addEventListener('pointerup', pointerup);
@@ -101,14 +120,20 @@ export function createInput(
     read() {
       const pressed = new Set<VirtualAction>(virtual);
       for (const key of keys) if (keyActions[key]) pressed.add(keyActions[key]);
-      const x = Number(pressed.has('right')) - Number(pressed.has('left'));
-      const z = Number(pressed.has('up')) - Number(pressed.has('down'));
+      const { x, z } = normalizeMovement(
+        movement.x + Number(pressed.has('right')) - Number(pressed.has('left')),
+        movement.z + Number(pressed.has('up')) - Number(pressed.has('down')),
+      );
       const interact = interactPending;
+      const attack = pressed.has('attack') || pointers.size > 0 || attackPending;
       interactPending = false;
-      return { x, z, attack: pressed.has('attack') || pointers.size > 0, interact };
+      attackPending = false;
+      return { x, z, attack, interact };
     },
     clear,
+    setMovement(x, z) { movement = normalizeMovement(x, z); },
     setVirtual(action, pressed) {
+      if (action === 'attack' && pressed && !virtual.has(action)) attackPending = true;
       if (action === 'interact' && pressed && !virtual.has(action)) {
         interactPending = true;
         onInteract?.();
@@ -121,6 +146,7 @@ export function createInput(
       window.removeEventListener('keydown', keydown);
       window.removeEventListener('keyup', keyup);
       window.removeEventListener('blur', clear);
+      window.removeEventListener('resize', clear);
       document.removeEventListener('visibilitychange', visibility);
       canvas.removeEventListener('pointerdown', pointerdown);
       canvas.removeEventListener('pointerup', pointerup);

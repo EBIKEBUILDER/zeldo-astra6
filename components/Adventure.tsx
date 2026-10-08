@@ -2,6 +2,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useGameStore } from '@/game/store';
 import { WORLDS } from '@/game/world';
+import type { GameData } from '@/game/types';
+import TouchControls from './TouchControls';
+import AdventureMap from './AdventureMap';
+import QuestJournal from './QuestJournal';
+import { useGameFullscreen } from './useGameFullscreen';
 import GameCanvas, { type GameControls } from './GameCanvas';
 import { Icon } from './Icons';
 
@@ -12,28 +17,18 @@ function Hearts() {
   return <div className="hearts" aria-label={`${hp / 2} of 3 hearts`}>{[0, 1, 2].map(i => <span className="heart-slot" key={i}><Icon name="heart" size={24} /><span className="heart-fill" style={{ width: `${Math.max(0, Math.min(1, (hp - i * 2) / 2)) * 100}%` }}><Icon name="heart" size={24} /></span></span>)}</div>;
 }
 
-function Minimap() {
-  const zone = useGameStore(s => s.zone);
-  const x = useGameStore(s => Math.round(s.player.x * 2) / 2);
-  const z = useGameStore(s => Math.round(s.player.z * 2) / 2);
-  const bossDefeated = useGameStore(s => s.bossDefeated);
-  const world = WORLDS[zone];
-  return <div className="minimap" aria-label="Map showing your position"><div className="map-header"><span>{zone === 'overworld' ? 'THE MOSSWOOD VALLEY' : 'THE LANTERN VAULT'}</span><span>N ↑</span></div><svg viewBox={`0 0 ${world.width} ${world.height}`} role="img" aria-label="Current area map"><rect width={world.width} height={world.height} fill={zone === 'overworld' ? '#a5b78b' : '#7b8171'} rx="1" />{world.decorations.filter(d => d.kind === 'path' || d.kind === 'bridge').map((d, i) => <rect key={`p${i}`} x={d.x - (d.w || 1) / 2} y={world.height - d.z - (d.d || 1) / 2} width={d.w || 1} height={d.d || 1} fill="#d3c193" />)}{world.obstacles.map((o, i) => <rect key={i} x={o.x - o.w / 2} y={world.height - o.z - o.d / 2} width={o.w} height={o.d} rx={o.kind === 'tree' ? '.7' : '.1'} fill={o.kind === 'water' ? '#74a7a3' : o.kind === 'tree' || o.kind === 'hedge' ? '#648065' : '#8a8b7b'} />)}<path d={`M${world.entrance.x - 1},${world.height - world.entrance.z + .8} l1,-2 l1,2Z`} fill="#f6ebc8"/><circle cx={x} cy={world.height - z} r="1.25" fill="#f9f4d9" stroke="#d16c3c" strokeWidth=".6" />{bossDefeated && zone === 'dungeon' && <circle cx={world.chest.x} cy={world.height - world.chest.z} r="1" fill="#f6cc75" />}</svg><div className="map-caption"><span className="map-you" /> You are here <span className="map-shrine">△</span> The old shrine</div></div>;
+function interactionFor(s: GameData) {
+  if (s.phase !== 'playing') return '';
+  const w = WORLDS[s.zone];
+  const near = (point: {x:number;z:number}, range:number) => Math.hypot(s.player.x-point.x,s.player.z-point.z) < range;
+  if (s.zone === 'overworld' && near(w.entrance, 2)) return 'Enter';
+  if (s.zone === 'dungeon' && near(w.exit, 1.7)) return 'Leave';
+  if (s.zone === 'dungeon' && near(w.chest, 1.9)) return s.bossDefeated ? 'Open' : 'Inspect';
+  if (s.zone === 'dungeon' && !s.gateOpen && near(w.gate, 2.1)) return 'Inspect';
+  return '';
 }
 
-function ContextHint() {
-  const hint = useGameStore(s => {
-    if (s.phase !== 'playing') return '';
-    const w = WORLDS[s.zone];
-    const near = (p: { x: number; z: number }, r = 2.7) => Math.hypot(s.player.x - p.x, s.player.z - p.z) < r;
-    if (s.zone === 'overworld' && near(w.entrance)) return 'Enter the Lantern Vault';
-    if (s.zone === 'dungeon' && near(w.exit)) return 'Return to the valley';
-    if (s.zone === 'dungeon' && !s.gateOpen && near(w.gate, 3.5)) return s.hasKey ? 'Unlock the old gate' : 'A key is needed';
-    if (s.zone === 'dungeon' && near(w.chest)) return s.bossDefeated ? 'Open the ember chest' : 'Defeat the guardian first';
-    return '';
-  });
-  return hint ? <div className="context-hint"><kbd>E</kbd>{hint}</div> : null;
-}
+const interactionHints: Record<string,string> = {Enter:'Enter the Lantern Vault',Leave:'Return to the valley',Open:'Open the ember chest',Inspect:'Inspect the old seal'};
 
 function BossHealth() {
   const hp = useGameStore(s => s.enemies.find(e => e.kind === 'boss')?.hp ?? 0);
@@ -45,10 +40,11 @@ function DamageFlash() { const flash = useGameStore(s => s.damageFlash); return 
 
 export default function Adventure() {
   const controls = useRef<GameControls | null>(null);
+  const { shell, fullscreen, enter: enterFullscreen, exit: exitFullscreen } = useGameFullscreen();
   const [ready, setReady] = useState(false);
-  const [help, setHelp] = useState(false);
-  const [mapOpen, setMapOpen] = useState(true);
-  const resumeAfterHelp = useRef(false);
+  const [modal, setModal] = useState<'help'|'map'|'inventory'|null>(null);
+  const modalRef = useRef<HTMLElement>(null);
+  const resumeAfterModal = useRef(false);
   const onReady = useCallback((c: GameControls) => { controls.current = c; setReady(true); }, []);
   const phase = useGameStore(s => s.phase);
   const muted = useGameStore(s => s.muted);
@@ -59,35 +55,59 @@ export default function Adventure() {
   const gateOpen = useGameStore(s => s.gateOpen);
   const bossDefeated = useGameStore(s => s.bossDefeated);
   const zone = useGameStore(s => s.zone);
+  const chestOpen = useGameStore(s => s.chestOpen);
+  const interaction = useGameStore(interactionFor);
   const message = useGameStore(s => s.messageTime > 0 ? s.message : '');
   const isTitle = phase === 'title';
   const active = phase === 'playing' || phase === 'paused';
-  const openHelp = () => { resumeAfterHelp.current = phase === 'playing'; if (phase === 'playing') controls.current?.pause(); setHelp(true); };
-  const closeHelp = () => { setHelp(false); if (resumeAfterHelp.current && useGameStore.getState().phase === 'paused') controls.current?.pause(); };
-  useEffect(() => { controls.current?.setModalOpen(help); }, [help, ready]);
+  const openModal = (next: 'help'|'map'|'inventory') => {
+    if (!modal) resumeAfterModal.current = phase === 'playing';
+    if (phase === 'playing') controls.current?.pause();
+    setModal(next);
+  };
+  const closeModal = useCallback(() => {
+    setModal(null);
+    if (resumeAfterModal.current && useGameStore.getState().phase === 'paused') controls.current?.pause();
+  }, []);
+  useEffect(() => { controls.current?.setModalOpen(modal !== null); }, [modal, ready]);
   useEffect(() => {
-    if (!help) return;
-    const handler = (e: KeyboardEvent) => { if (e.code === 'Escape') { e.stopImmediatePropagation(); setHelp(false); if (resumeAfterHelp.current && useGameStore.getState().phase === 'paused') controls.current?.pause(); } };
+    if (!modal) return;
+    const before = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    if (modal !== 'map') modalRef.current?.querySelector<HTMLElement>('button')?.focus();
+    const handler = (event: KeyboardEvent) => {
+      if (event.code === 'Escape') { event.preventDefault(); event.stopImmediatePropagation(); closeModal(); }
+      if (event.code === 'Tab' && modal !== 'map') {
+        const items = [...(modalRef.current?.querySelectorAll<HTMLElement>('button:not(:disabled), a[href], [tabindex="0"]') ?? [])];
+        const first = items[0], last = items.at(-1);
+        if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+        else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+      }
+    };
     window.addEventListener('keydown', handler, true);
-    return () => window.removeEventListener('keydown', handler, true);
-  }, [help]);
-  const quest = bossDefeated ? ['The last little light', 'The guardian rests. Open the ember chest.'] : gateOpen ? ['A keeper in the dark', 'Dodge its charge. Sidestep violet wisps—or swing to return them.'] : hasKey ? ['A door worth opening', 'Use the old key at the northern gate.'] : zone === 'dungeon' ? ['Something left behind', 'Find the old key on the western pedestal.'] : ['Follow the forgotten path', 'Cross the river. Find the shrine to the northeast.'];
-  const touchButton = (action: Parameters<GameControls['virtual']>[0], label: string, content: React.ReactNode, extra = '') => <button aria-label={label} className={extra} onPointerDown={e => { e.preventDefault(); e.currentTarget.setPointerCapture(e.pointerId); controls.current?.virtual(action, true); }} onPointerUp={() => controls.current?.virtual(action, false)} onPointerCancel={() => controls.current?.virtual(action, false)} onLostPointerCapture={() => controls.current?.virtual(action, false)}>{content}</button>;
+    return () => { window.removeEventListener('keydown', handler, true); if (modal !== 'map') {
+      const target = useGameStore.getState().phase === 'playing' ? document.querySelector<HTMLCanvasElement>('.world-canvas') : before;
+      target?.focus({preventScroll:true});
+    } };
+  }, [modal, closeModal]);
 
-  return <div className="app-shell">
+  return <div ref={shell} className={`app-shell ${isTitle ? 'at-title' : 'in-adventure'} ${fullscreen ? 'is-fullscreen' : ''}`}>
     <header className="site-header">
       <a href="/" className="wordmark" aria-label="Zeldo home"><span className="brand-mark"><Icon name="flame" size={27} /></span><span>ZELDO<span className="brand-tagline">A LITTLE WORLD. A GRAND ADVENTURE.</span></span></a>
-      <div className="header-right"><span className="edition">AN ORIGINAL POCKET ADVENTURE <span>№ 001</span></span><button className="text-button help-button" onClick={openHelp} aria-label="How to play"><Icon name="book" size={17} /><span>How to play</span></button><span className="header-divider" /><button className="text-button sound-button" onClick={() => controls.current?.mute()} disabled={!ready} aria-label={muted ? 'Unmute sound' : 'Mute sound'}><Icon name={muted ? 'mute' : 'sound'} size={18} /><span>Sound {muted ? 'off' : 'on'}</span></button></div>
+      <div className="header-right"><button className="text-button fullscreen-button" onClick={() => void enterFullscreen()} aria-label="Fullscreen game"><Icon name="expand" size={18}/><span>Fullscreen</span></button><span className="edition">AN ORIGINAL POCKET ADVENTURE <span>№ 001</span></span><button className="text-button help-button" onClick={() => openModal('help')} aria-label="How to play"><Icon name="book" size={17} /><span>How to play</span></button><span className="header-divider" /><button className="text-button sound-button" onClick={() => controls.current?.mute()} disabled={!ready} aria-label={muted ? 'Unmute sound' : 'Mute sound'}><Icon name={muted ? 'mute' : 'sound'} size={18} /><span>Sound {muted ? 'off' : 'on'}</span></button></div>
     </header>
 
-    <main className={`game-stage ${isTitle ? 'is-title' : ''}`}>
+    <main className={`game-stage ${isTitle ? 'is-title' : 'is-adventure'} ${zone === 'dungeon' && gateOpen && !bossDefeated ? 'in-boss-zone' : ''}`}>
       <GameCanvas onReady={onReady} />
       <div className="scene-grain" />
       {isTitle && <div className="title-wash" />}
       <div className="stage-topbar">
-        <div className="vitals"><Hearts /><span className="vitals-divider" /><span className="rupees"><Icon name="gem" size={22} /><span>{String(rupees).padStart(3, '0')}</span></span>{hasKey && <span className="key-owned" title="The old key"><Icon name="key" size={19} /></span>}</div>
-        <div className="area-badge"><span className="live-dot" /><span>{area || 'Willow’s Rest'}</span><span className="area-divider" /><Icon name={zone === 'dungeon' ? 'flame' : 'sun'} size={18} /></div>
-        {active && <button className="stage-pause" onClick={() => controls.current?.pause()} aria-label={phase === 'paused' ? 'Resume game' : 'Pause game'}><Icon name="pause" size={18} /></button>}
+        <div className="vitals">
+          {active && <div className="hero-portrait" aria-hidden="true"><Icon name="leaf" size={25}/></div>}
+          <div className="vitals-content">{active && <div className="hero-name">Wayfarer <span>CHAPTER I</span></div>}<div className="vitals-row"><Hearts /><span className="vitals-divider" /><span className="rupees" aria-label={`${rupees} rupees`}><Icon name="gem" size={20} /><span>{String(rupees).padStart(3, '0')}</span></span>{hasKey && <span className="key-owned" aria-label="Brass key collected"><Icon name="key" size={17} /></span>}</div></div>
+        </div>
+        {isTitle && <div className="area-badge"><span className="live-dot" /><span>{area || 'Willow’s Rest'}</span><Icon name="sun" size={18} /></div>}
+        {active && <button className="stage-pause" onClick={() => controls.current?.pause()} aria-label={phase === 'paused' ? 'Resume game' : 'Pause game'}><Icon name={phase === 'paused' ? 'arrow' : 'pause'} size={19} /></button>}
+
       </div>
 
       {isTitle && <section className="title-content">
@@ -96,23 +116,47 @@ export default function Adventure() {
         <p className="title-story">Somewhere beyond the moss,<br />a little light is waiting.</p>
         <p className="title-description">A quiet valley. A forgotten shrine. One brave little soul.<br className="wide-break" /> Take your sword and see what lies beyond the trees.</p>
         <button className="primary-button begin-button" onClick={() => controls.current?.start()} disabled={!ready}><Icon name="sword" size={21} /><span>{ready ? 'Begin adventure' : 'Waking the valley…'}</span><Icon name="arrow" size={21} /></button>
-        <div className="enter-hint">or press <kbd>Enter</kbd><span className="hint-rule" /> your story starts here</div>
+        <div className="enter-hint desktop-copy">or press <kbd>Enter</kbd><span className="hint-rule" /> your story starts here</div>
         <div className="title-meta"><span><Icon name="clock" size={14} />5–10 minute adventure</span><span className="meta-dot">·</span><span>No downloads. Just wander.</span></div>
       </section>}
 
       {isTitle && <div className="scene-caption"><span className="caption-line" /><span><span className="caption-top">YOUR FIRST CHAPTER</span>Willow’s Rest</span><Icon name="leaf" size={26} /></div>}
       {isTitle && <div className="compass-rose"><span>N</span><Icon name="compass" size={34} /></div>}
 
-      {active && <><BossHealth /><div className="quest-card"><div className="quest-emblem"><Icon name={bossDefeated ? 'flame' : hasKey ? 'key' : 'compass'} size={23} /></div><div><span className="quest-label">{bossDefeated ? 'ONE LAST THING' : 'YOUR ADVENTURE'}</span><h2>{quest[0]}</h2><p>{quest[1]}</p></div></div><div className="map-container"><button className="map-toggle" onClick={() => setMapOpen(!mapOpen)} aria-expanded={mapOpen}><Icon name="compass" size={15} />{mapOpen ? 'Hide map' : 'Show map'}</button>{mapOpen && <Minimap />}</div><ContextHint /><div className="field-controls"><span><kbd>W A S D</kbd> move</span><span><kbd>Space</kbd> swing</span><span><kbd>E</kbd> interact</span></div><div className="touch-controls"><div className="touch-dpad">{touchButton('up', 'Move north', '↑', 'touch-up')}{touchButton('left', 'Move left', '←', 'touch-left')}{touchButton('down', 'Move south', '↓', 'touch-down')}{touchButton('right', 'Move right', '→', 'touch-right')}</div><div className="touch-actions">{touchButton('interact', 'Interact', 'E')}{touchButton('attack', 'Swing sword', <Icon name="sword" size={26} />, 'touch-sword')}</div></div></>}
+      {active && <>
+        <BossHealth />
+        <QuestJournal />
+        <AdventureMap expanded={modal === 'map'} onExpand={() => openModal('map')} onClose={closeModal} />
+        {interaction && <div className="context-hint"><kbd className="desktop-copy">E</kbd><Icon name={interaction === 'Open' ? 'key' : 'arrow'} size={16}/>{interactionHints[interaction]}</div>}
+        <div className="adventure-toolbar">
+          <span className="equipped-sword"><Icon name="sword" size={24}/><span><small>EQUIPPED</small>Worn sword</span><kbd>Space</kbd></span>
+          <button className="gear-toggle" onClick={() => openModal('inventory')} aria-label="Open satchel"><Icon name="satchel" size={23}/><span>Satchel</span>{hasKey && <span className="item-notice"/>}</button>
+        </div>
+        <div className="field-controls"><span><kbd>W A S D</kbd> move</span><span><kbd>Space</kbd> swing</span><span><kbd>E</kbd> interact</span></div>
+        <TouchControls controls={controls} enabled={phase === 'playing' && !modal} interactLabel={interaction || 'Interact'} interactAvailable={!!interaction}/>
+      </>}
+
       {message && active && <div className="game-toast" key={message}><Icon name={message.toLowerCase().includes('key') ? 'key' : 'flame'} size={20} /><span>{message}</span></div>}
       <DamageFlash />
+      {fullscreen && <button className="fullscreen-exit" onClick={() => void exitFullscreen()} aria-label="Exit fullscreen"><Icon name="contract" size={19}/></button>}
 
-      {phase === 'paused' && !help && <div className="modal-shade"><section className="story-modal pause-modal"><span className="modal-illustration"><Icon name="leaf" size={35} /></span><span className="eyebrow">A MOMENT IN THE MOSS</span><h2>Take a little breath.</h2><p>The valley will be right here.</p><button className="primary-button" onClick={() => controls.current?.pause()}>Continue adventure <Icon name="arrow" /></button><button className="subtle-button" onClick={openHelp}>A little help?</button><span className="modal-keyhint"><kbd>Esc</kbd> to return</span></section></div>}
-      {(phase === 'gameover' || phase === 'victory') && <div className="modal-shade ending-shade"><section className={`story-modal ending-modal ${phase === 'victory' ? 'victory-modal' : ''}`}><span className="modal-illustration"><Icon name={phase === 'victory' ? 'flame' : 'heart'} size={44} /></span><span className="eyebrow">{phase === 'victory' ? 'EVERY LITTLE LIGHT MATTERS' : 'THIS ISN’T THE END'}</span><h2>{phase === 'victory' ? <>A little ember.<br /><em>A grand adventure.</em></> : <>Even brave souls<br />need another try.</>}</h2><p>{phase === 'victory' ? 'You found the last ember and brought a little warmth back to the valley. The moss will remember you.' : 'The path is still there. Pick up your sword, catch your breath, and make this story yours.'}</p><div className="ending-stats"><div><Icon name="clock" size={18} /><strong>{formatTime(time)}</strong><span>TIME WANDERED</span></div><div><Icon name="gem" size={18} /><strong>{rupees}</strong><span>RUPEES GATHERED</span></div></div><button className="primary-button" onClick={() => controls.current?.restart()}><Icon name={phase === 'victory' ? 'reset' : 'sword'} size={20} />{phase === 'victory' ? 'Wander once more' : 'Try again'}<Icon name="arrow" size={20} /></button><span className="modal-keyhint">or press <kbd>Enter</kbd></span></section></div>}
+      {phase === 'paused' && !modal && <div className="modal-shade"><section className="story-modal pause-modal"><span className="modal-illustration"><Icon name="leaf" size={35} /></span><span className="eyebrow">A MOMENT IN THE MOSS</span><h2>Take a little breath.</h2><p>The valley will be right here.</p><button className="primary-button" onClick={() => controls.current?.pause()}>Continue adventure <Icon name="arrow" /></button><button className="subtle-button" onClick={() => openModal('help')}>A little help?</button><span className="modal-keyhint desktop-copy"><kbd>Esc</kbd> to return</span></section></div>}
+      {(phase === 'gameover' || phase === 'victory') && <div className="modal-shade ending-shade"><section className={`story-modal ending-modal ${phase === 'victory' ? 'victory-modal' : ''}`}><span className="modal-illustration"><Icon name={phase === 'victory' ? 'flame' : 'heart'} size={44} /></span><span className="eyebrow">{phase === 'victory' ? 'EVERY LITTLE LIGHT MATTERS' : 'THIS ISN’T THE END'}</span><h2>{phase === 'victory' ? <>A little ember.<br /><em>A grand adventure.</em></> : <>Even brave souls<br />need another try.</>}</h2><p>{phase === 'victory' ? 'You found the last ember and brought a little warmth back to the valley. The moss will remember you.' : 'The path is still there. Pick up your sword, catch your breath, and make this story yours.'}</p><div className="ending-stats"><div><Icon name="clock" size={18} /><strong>{formatTime(time)}</strong><span>TIME WANDERED</span></div><div><Icon name="gem" size={18} /><strong>{rupees}</strong><span>RUPEES GATHERED</span></div></div><button className="primary-button" onClick={() => { setModal(null); resumeAfterModal.current = false; controls.current?.restart(); }}><Icon name={phase === 'victory' ? 'reset' : 'sword'} size={20} />{phase === 'victory' ? 'Wander once more' : 'Try again'}<Icon name="arrow" size={20} /></button><span className="modal-keyhint desktop-copy">or press <kbd>Enter</kbd></span></section></div>}
 
-      {help && <div className="modal-shade" onClick={closeHelp}><section className="story-modal help-modal" role="dialog" aria-modal="true" aria-label="How to play" onClick={e => e.stopPropagation()}><button className="close-button" onClick={closeHelp} aria-label="Close instructions"><Icon name="close" /></button><span className="eyebrow">A SMALL FIELD GUIDE</span><h2>A little courage.<br /><em>A few simple moves.</em></h2><div className="help-controls"><div><span><kbd>W A S D</kbd><small>or arrow keys</small></span><p>Find your own way<span>Move through the valley.</span></p></div><div><span><kbd>Space</kbd><small>or click the world</small></span><p>Make a little room<span>Swing toward the way you’re facing.</span></p></div><div><span><kbd>E</kbd></span><p>See what’s inside<span>Enter the shrine, unlock gates, open treasure.</span></p></div><div><span><kbd>Esc</kbd><kbd>M</kbd></span><p>Take it easy<span>Pause your adventure or toggle sound.</span></p></div></div><div className="help-tip"><Icon name="leaf" size={20} /><p>Follow the pale path northeast, across the river, to the old shrine. Cut grass and break pots for hearts and rupees. Your little home clearing is always safe.</p></div><button className="primary-button" onClick={closeHelp}>I’m ready <Icon name="arrow" size={19} /></button></section></div>}
+      {modal === 'help' && <div className="modal-shade" onClick={closeModal}><section ref={modalRef} className="story-modal help-modal" role="dialog" aria-modal="true" aria-label="How to play" onClick={e => e.stopPropagation()}><button className="close-button" onClick={closeModal} aria-label="Close instructions"><Icon name="close" /></button><span className="eyebrow">A SMALL FIELD GUIDE</span><h2>A little courage.<br /><em>A few simple moves.</em></h2><div className="help-controls"><div><span><strong className="mobile-copy">Drag joystick</strong><span className="desktop-copy"><kbd>W A S D</kbd><small>or arrow keys</small></span></span><p>Find your own way<span>Move freely; a light joystick tilt lets you walk slowly.</span></p></div><div><span><strong className="mobile-copy">Hold attack</strong><span className="desktop-copy"><kbd>Space</kbd><small>or click the world</small></span></span><p>Make a little room<span>Swing toward the way you’re facing.</span></p></div><div><span><strong className="mobile-copy">Tap interact</strong><kbd className="desktop-copy">E</kbd></span><p>See what’s inside<span>Use the nearby action to enter, inspect, or open treasure.</span></p></div><div><span><strong className="mobile-copy">Map & pause</strong><span className="desktop-copy"><kbd>Esc</kbd> <kbd>M</kbd></span></span><p>Take it easy<span>Opening the map or satchel pauses your adventure.</span></p></div></div><div className="help-tip"><Icon name="leaf" size={20} /><p>Follow the pale path northeast, across the river, to the old shrine. Cut grass and break pots for hearts and rupees. Your home clearing is always safe. Follow the gold marker on your map. Violet wisps can be returned with your sword.</p></div><button className="primary-button" onClick={closeModal}>I’m ready <Icon name="arrow" size={19} /></button></section></div>}
+      {modal === 'inventory' && <div className="modal-shade" onClick={closeModal}><section ref={modalRef} className="story-modal inventory-modal" role="dialog" aria-modal="true" aria-label="Traveler’s satchel" onClick={e => e.stopPropagation()}>
+        <button className="close-button" aria-label="Close satchel" onClick={closeModal}><Icon name="close"/></button>
+        <span className="eyebrow">YOUR ADVENTURE · CHAPTER I</span><h2>Traveler’s satchel</h2><p>A small collection. A long way to go.</p>
+        <div className="inventory-items">
+          <div className="inventory-item"><span className="item-art"><Icon name="sword" size={29}/></span><div><h3>Worn sword</h3><p>A trusty blade. Swings toward your facing.</p><span className="item-tag">EQUIPPED</span></div></div>
+          <div className={`inventory-item ${hasKey ? '' : 'not-found'}`}><span className="item-art"><Icon name="key" size={29}/></span><div><h3>Old brass key</h3><p>{hasKey ? 'The key to the Guardian’s gate.' : 'Waiting somewhere in the Lantern Vault.'}</p><span className="item-tag">{hasKey ? 'COLLECTED' : 'UNDISCOVERED'}</span></div></div>
+          <div className={`inventory-item ${chestOpen ? '' : 'not-found'}`}><span className="item-art"><Icon name="flame" size={29}/></span><div><h3>The last ember</h3><p>{chestOpen ? 'A little warmth for the valley.' : 'The reason for your journey.'}</p><span className="item-tag">{chestOpen ? 'RECOVERED' : 'QUEST ITEM'}</span></div></div>
+        </div><div className="satchel-summary"><span><Icon name="gem" size={17}/>{rupees} rupees</span><span><Icon name="clock" size={17}/>{formatTime(time)} wandered</span></div>
+        <button className="primary-button" onClick={closeModal}>Back to adventure <Icon name="arrow" size={18}/></button>
+      </section></div>}
+
     </main>
 
-    <footer className="site-footer"><span><span className="footer-dot" /> MADE FOR THE JOY OF GETTING A LITTLE LOST</span><div>{active ? <><Icon name="clock" size={13} /><span>{formatTime(time)}</span><span className="footer-separator">/</span><button onClick={() => controls.current?.restart()}><Icon name="reset" size={13} />Start over</button></> : <><span>EXPLORE.</span><span>BE BRAVE.</span><span>BRING THE LIGHT HOME.</span><Icon name="flame" size={15} /></>}</div></footer>
+    <footer className="site-footer"><span><span className="footer-dot" /> MADE FOR THE JOY OF GETTING A LITTLE LOST</span><div>{active ? <><Icon name="clock" size={13} /><span>{formatTime(time)}</span><span className="footer-separator">/</span><button onClick={() => { setModal(null); resumeAfterModal.current = false; controls.current?.restart(); }}><Icon name="reset" size={13} />Start over</button></> : <><span>EXPLORE.</span><span>BE BRAVE.</span><span>BRING THE LIGHT HOME.</span><Icon name="flame" size={15} /></>}</div></footer>
   </div>;
 }
