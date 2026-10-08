@@ -18,6 +18,9 @@ export type GameControls = {
 export default function GameCanvas({ onReady }: { onReady: (controls: GameControls) => void }) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const fps = useRef<HTMLSpanElement>(null);
+  const frameMs = useRef<HTMLSpanElement>(null);
+  const drawCalls = useRef<HTMLSpanElement>(null);
+  const activeMeshes = useRef<HTMLSpanElement>(null);
   const phase = useGameStore(s => s.phase);
   const [error, setError] = useState('');
   useEffect(() => {
@@ -59,10 +62,12 @@ export default function GameCanvas({ onReady }: { onReady: (controls: GameContro
         audio.setMuted(current.muted);
         current.sounds.forEach(event => { if (event.id > soundId) { audio.play(event.name); soundId = event.id; } });
         renderer.render(current, dt);
-        const sample = stats.record(now, renderer.drawCalls());
-        if (sample && fps.current) {
-          fps.current.textContent = `${sample.fps} FPS`;
-          fps.current.title = `${sample.drawCalls} draw calls per frame, including shadows`;
+        const sample = stats.record(now, renderer.drawCalls(), renderer.activeMeshes());
+        if (sample) {
+          if (fps.current) fps.current.textContent = `${sample.fps} FPS`;
+          if (frameMs.current) frameMs.current.textContent = `${sample.frameMs.toFixed(1)} ms`;
+          if (drawCalls.current) drawCalls.current.textContent = `${sample.drawCalls} draws`;
+          if (activeMeshes.current) activeMeshes.current.textContent = `${sample.activeMeshes} meshes`;
         }
         frame = requestAnimationFrame(loop);
       };
@@ -102,5 +107,12 @@ export default function GameCanvas({ onReady }: { onReady: (controls: GameContro
     });
     return () => { disposed = true; cleanup?.(); };
   }, [onReady]);
-  return <><canvas ref={canvas} className="world-canvas" aria-label="Zeldo 3D adventure. Move with WASD, arrow keys, or the touch joystick. Swing with Space or the Sword button; interact with E or the action button." tabIndex={0} /><span ref={fps} className="fps-counter" hidden={phase !== 'playing' && phase !== 'paused'} aria-label="Frames per second">— FPS</span>{error && <div className="render-error"><h2>The valley couldn’t wake up.</h2><p>{error}</p><p>Enable hardware acceleration or try another browser, then refresh.</p></div>}</>;
+  return <><canvas ref={canvas} className="world-canvas" aria-label="Zeldo 3D adventure. Move with WASD, arrow keys, or the touch joystick. Swing with Space or the Sword button; interact with E or the action button." tabIndex={0} />
+    <div className="fps-counter" hidden={phase !== 'playing' && phase !== 'paused'} role="group" aria-label="Rendering performance" title="Half-second averages: frames per second, milliseconds per frame, draw calls including shadows, and active scene meshes.">
+      <span ref={fps} data-perf-stat="fps">— FPS</span>
+      <span ref={frameMs} data-perf-stat="frame-ms">— ms</span>
+      <span ref={drawCalls} data-perf-stat="draw-calls">— draws</span>
+      <span ref={activeMeshes} data-perf-stat="active-meshes">— meshes</span>
+    </div>
+    {error && <div className="render-error"><h2>The valley couldn’t wake up.</h2><p>{error}</p><p>Enable hardware acceleration or try another browser, then refresh.</p></div>}</>;
 }

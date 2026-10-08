@@ -691,5 +691,10 @@ export function createGameRenderer(canvas: HTMLCanvasElement) {
     scene.render();
   }
   function dispose() { instrumentation.dispose(); scene.dispose(); engine.dispose(); }
-  return { render, resize, dispose, drawCalls: () => instrumentation.drawCallsCounter.current, ready: () => scene.whenReadyAsync() };
+  return {
+    render, resize, dispose,
+    drawCalls: () => instrumentation.drawCallsCounter.current,
+    activeMeshes: () => scene.getActiveMeshes().length,
+    ready: () => scene.whenReadyAsync(),
+  };
 }

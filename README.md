@@ -37,7 +37,7 @@ On phones and tablets, drag the left joystick to move; a small tilt walks slowly
 
 Use **Fullscreen** in the header to give the game the whole screen. The exit button stays beside Pause. On browsers without native fullscreen support, this still hides the site header and footer.
 
-The field HUD shows your hearts, rupees, current quest, a live minimap with facing and objective markers, and an FPS counter beneath Pause. FPS measures rendered frames over a half-second window, including slow frames; the counter updates twice per second. Tap the minimap to open a larger field map; tap **Satchel** to inspect your sword and quest items. Both menus pause the game and return you to the same adventure. Tap the quest card to see its milestones. Portrait and landscape layouts keep thumb controls clear of the central playfield.
+The field HUD shows your hearts, rupees, current quest, a live minimap with facing and objective markers, and performance stats beneath Pause. The stats show **FPS**, average **ms** per frame, **draws** (draw calls per frame, including shadows), and active **meshes** selected for rendering. All four use the same half-second window and update twice per second. Frame time includes slow frames and browser scheduling; it is not GPU execution time. Hidden tabs suspend rendering and reset the measurement window on return. Tap the minimap to open a larger field map; tap **Satchel** to inspect your sword and quest items. Both menus pause the game and return you to the same adventure. Tap the quest card to see its milestones. Portrait and landscape layouts keep thumb controls clear of the central playfield.
 
 ## The adventure
 
@@ -83,7 +83,7 @@ The original resolution, antialiasing, 2048px blurred shadow map, lighting, geom
 ```sh
 node scripts/render-benchmark.cjs --source /path/to/baseline/game --output test-artifacts/render-baseline
 node scripts/render-benchmark.cjs --compare test-artifacts/render-baseline --output test-artifacts/render-current
-# With the game running locally, check FPS, pause/resume and six responsive layouts:
+# With the game running locally, check performance stats, pause/resume and twelve responsive layouts:
 node scripts/fps-ui-smoke.cjs http://127.0.0.1:3000
 ```
 
