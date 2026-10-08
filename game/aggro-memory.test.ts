@@ -23,27 +23,27 @@ function advance(state: GameData, seconds: number): GameData {
   return state;
 }
 
-test('escaping requires a sustained large gap instead of immediately dropping a distant pursuer', () => {
+test('opening a large gap does not drop a pursuer that is still making progress', () => {
   let state = encounter({ x: 14.6, z: 6 }, { x: 17, z: 6 });
   state = stepGame(state, FIXED_DT, idle);
   assert.equal(state.enemies[0].aggro, true);
   Object.assign(state.player, { x: 45, z: 13 });
   state = advance(state, 2.5);
   assert.ok(distance(state.enemies[0], state.player) > 22, 'The hero has opened a substantial gap');
-  assert.equal(state.enemies[0].aggro, true, 'A far-away target gets a grace period before the monster gives up');
+  assert.equal(state.enemies[0].aggro, true, 'Keep following a distant target while a route is usable');
   assert.equal(state.enemies[0].mode, 'chase');
   state = advance(state, .6);
-  assert.equal(state.enemies[0].aggro, false, 'Sustaining that large gap for three seconds allows escape');
-  assert.notEqual(state.enemies[0].mode, 'chase');
+  assert.equal(state.enemies[0].aggro, true, 'Three seconds far away is not a reason to give up');
+  assert.equal(state.enemies[0].mode, 'chase');
 });
 
-test('closing a briefly opened escape gap renews the entire distance grace period', () => {
+test('repeatedly widening the gap does not accumulate a distance leash', () => {
   let state = encounter({ x: 14.6, z: 6 }, { x: 17, z: 6 });
   state = stepGame(state, FIXED_DT, idle);
   Object.assign(state.player, { x: 45, z: 13 });
   state = advance(state, 2);
   assert.equal(state.enemies[0].aggro, true);
-  assert.ok(state.enemies[0].farTime > 1.9);
+  assert.equal(state.enemies[0].farTime, 0);
   Object.assign(state.player, { x: 18, z: 13 });
   state = stepGame(state, FIXED_DT, idle);
   assert.equal(state.enemies[0].farTime, 0);
@@ -52,7 +52,7 @@ test('closing a briefly opened escape gap renews the entire distance grace perio
   assert.equal(state.enemies[0].aggro, true, 'Separate short escapes must not accumulate into an abrupt reset');
 });
 
-test('a fully hidden distant hero remains remembered for eighteen seconds', () => {
+test('a locked gate only ends pursuit after twenty seconds of actual stalled movement', () => {
   let state = encounter({ x: 10, z: 12 }, { x: 10, z: 10 }, 'dungeon');
   state = stepGame(state, FIXED_DT, idle);
   assert.equal(state.enemies[0].aggro, true);
@@ -62,10 +62,13 @@ test('a fully hidden distant hero remains remembered for eighteen seconds', () =
   state = advance(state, 17.5);
   assert.equal(state.enemies[0].aggro, true);
   assert.equal(state.enemies[0].mode, 'chase');
-  assert.ok(state.enemies[0].lostSightTime > 17.4);
+  assert.equal(state.enemies[0].lostSightTime, 0, 'Concealment alone must not expire pursuit');
   assert.ok(state.enemies[0].z < 13.1, 'Remembering the hero must not bypass the locked gate');
   state = advance(state, .6);
-  assert.equal(state.enemies[0].aggro, false, 'Extended complete concealment eventually permits a natural reset');
+  assert.equal(state.enemies[0].aggro, true, 'The old concealment deadline does not end the chase');
+  state = advance(state, 4);
+  assert.equal(state.enemies[0].aggro, false, 'Extended immobility eventually permits a natural reset');
+  assert.equal(state.enemies[0].pursuitBlocked, true);
 });
 
 test('a nearby hero behind a wall maintains the pursuer’s attention', () => {
@@ -75,6 +78,37 @@ test('a nearby hero behind a wall maintains the pursuer’s attention', () => {
   assert.equal(state.enemies[0].mode, 'chase');
   assert.equal(state.enemies[0].lostSightTime, 0);
   assert.ok(state.enemies[0].z < 13.1);
+});
+
+test('a timed-out pursuer navigates an obstructed return route while probing the unreachable hero', () => {
+  let state = encounter({ x: 10, z: 12.8 }, { x: 10, z: 17 }, 'dungeon');
+  Object.assign(state.enemies[0], { spawnX: 8, spawnZ: 12.8, aggro: true, mode: 'chase', stuckTime: 19.99 });
+  // The gate prevents reaching the hero; this pot also blocks the straight
+  // route home. Recovery probes must not consume the return route's timer.
+  state.breakables = [{ id: 'return-route-pot', zone: 'dungeon', kind: 'pot',
+    x: 9, z: 12.8, broken: false, lastAttackId: -1 }];
+  state = stepGame(state, FIXED_DT, idle);
+  assert.equal(state.enemies[0].pursuitBlocked, true);
+  assert.equal(state.enemies[0].mode, 'return');
+  state = advance(state, 5);
+  assert.equal(state.enemies[0].aggro, false, 'Keep the unreachable hero suppressed while returning');
+  assert.ok(distance(state.enemies[0], { x: 8, z: 12.8 }) < .3, 'Walk around the pot and reach home');
+});
+
+test('opening the gate restores pursuit of the same nearby hero after a stall reset', () => {
+  let state = encounter({ x: 10, z: 12.8 }, { x: 10, z: 17 }, 'dungeon');
+  Object.assign(state.enemies[0], { aggro: true, mode: 'chase', stuckTime: 19.99 });
+  state = stepGame(state, FIXED_DT, idle);
+  assert.equal(state.enemies[0].pursuitBlocked, true);
+  state = advance(state, .25);
+  assert.equal(state.enemies[0].aggro, false, 'The closed gate must not trigger immediate reacquisition');
+  const before = distance(state.enemies[0], state.player);
+  state.gateOpen = true;
+  state = advance(state, 1.5);
+  assert.equal(state.enemies[0].aggro, true);
+  assert.equal(state.enemies[0].pursuitBlocked, false);
+  assert.equal(state.enemies[0].mode, 'chase');
+  assert.ok(distance(state.enemies[0], state.player) < before - 1, 'Use the newly opened route without requiring hero movement');
 });
 
 test('renewed sight and nearby awareness each refresh pursuit memory', () => {

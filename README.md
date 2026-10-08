@@ -41,8 +41,10 @@ Touch devices have directional, sword, and interaction buttons. Sword swings fol
 2. Cross the river and follow the path northeast to the stone shrine. Press **E** near the entrance.
 3. Find the brass key on the western pedestal in the first room. Walk into it to collect it and recover a heart.
 4. Approach the northern gate with the key to break its seal.
-5. Defeat the Hollow Guardian. Watch its windup, step away from its charge, then move in and swing.
+5. Defeat the Hollow Guardian. Watch its windup, step away from its charge, then move in and swing. If its approach is blocked, a violet warning marks a locked shot: sidestep the line, or swing into the incoming wisp to send it back. Returned wisps hurt the Guardian; stone blocks them in either direction.
 6. Press **E** beside the unlocked northern chest to recover the ember and finish. Your time and rupee total appear on the victory screen.
+
+Monsters use obstacle-aware routes and keep chasing once alerted, even through long detours. Only twenty seconds without movement ends a stalled chase; they then turn and walk home. The home clearing remains safe, and staying there for eighteen seconds lets pursuers lose interest.
 
 Cut grass and break pots for rupees and healing hearts. Ordinary monsters return after roughly 20 seconds; the guardian stays defeated. Losing all three hearts opens the retry screen. Leaving the browser tab automatically pauses the game.
 
@@ -51,6 +53,8 @@ Cut grass and break pots for rupees and healing hearts. Ordinary monsters return
 - `game/types.ts` defines serializable world and game data.
 - `game/world.ts` lays out the overworld, dungeon, obstacles, and decorative details.
 - `game/simulation.ts` owns movement, collision and separation, combat, enemies, pickups, particles, quest progression, and seeded randomness.
+- `game/pathfinding.ts` finds routes with eight-way A* and a corner-based fallback for narrow gaps.
+- `game/pursuit-memory.ts` retains aggression while monsters navigate and handles stalled pursuit recovery.
 - `game/store.ts` exposes that data and game actions through Zustand.
 - `game/renderer.ts` builds the Babylon scene and reads game data to update its meshes, camera, lighting, and effects. It does not advance gameplay.
 - `game/input.ts` combines keyboard, pointer, and touch input; interactions are consumed once per press.

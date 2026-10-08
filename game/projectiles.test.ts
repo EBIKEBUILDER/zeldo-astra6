@@ -23,29 +23,42 @@ function trapBoss(s:GameData) {
   return s;
 }
 function shot(s:GameData,values:Partial<Projectile>={}) {
-  return {id:9000,zone:'dungeon' as const,ownerId:s.enemies[0].id,x:8,z:24.5,vx:7.2,vz:0,radius:.18,life:4,age:0,...values};
+  return {id:9000,zone:'dungeon' as const,ownerId:s.enemies[0].id,x:8,z:24.5,vx:7.2,vz:0,radius:.18,life:4,age:0,reflected:false,...values};
 }
 
-test('a stalled pursuit fires after half a second and respects its three-second cooldown',()=>{
+test('a stalled pursuit warns for 0.8 seconds before firing, then respects its cooldown',()=>{
   let s=trapBoss(arena());
-  s=frames(s,29);assert.equal(s.projectiles.length,0);assert.equal(s.sounds.filter(e=>e.name==='swing').length,0);
+  s=frames(s,29);assert.equal(s.projectiles.length,0);
+  assert.equal(s.sounds.filter(e=>e.name==='ranged-charge').length,0);
+  s=frames(s,1);assert.equal(s.enemies[0].mode,'ranged-windup');assert.equal(s.projectiles.length,0);
+  assert.equal(s.sounds.filter(e=>e.name==='ranged-charge').length,1);
+  s=frames(s,47);assert.equal(s.projectiles.length,0,'The entire warning is safe');
   s=frames(s,1);assert.equal(s.projectiles.length,1);
   const first=s.projectiles[0];
   assert.ok(Math.abs(Math.hypot(first.vx,first.vz)-7.2)<1e-9);
-  assert.ok(first.vz>0&&Math.abs(first.vx)<1e-9,'Aim at the player at launch');
-  s=frames(s,178);assert.equal(s.sounds.filter(e=>e.name==='swing').length,1);
-  s=frames(s,3);assert.equal(s.sounds.filter(e=>e.name==='swing').length,2);
+  assert.ok(first.vz>0&&Math.abs(first.vx)<1e-9);
+  s=frames(s,179);assert.equal(s.sounds.filter(e=>e.name==='ranged-fire').length,1);
+  s=frames(s,50);assert.equal(s.sounds.filter(e=>e.name==='ranged-fire').length,2);
+});
+
+test('the warning locks its aim so sidestepping before release dodges the shot',()=>{
+  let s=trapBoss(arena());s=frames(s,30);
+  assert.equal(s.enemies[0].rangedAimX,10);assert.equal(s.enemies[0].rangedAimZ,24.5);
+  const moveRight={...idle,x:1};
+  for(let frame=0;frame<48;frame++)s=stepGame(s,FIXED_DT,moveRight);
+  assert.equal(s.projectiles.length,1);assert.ok(Math.abs(s.projectiles[0].vx)<1e-9);
+  s=frames(s,60);assert.equal(s.player.hp,6,'The bolt never homes onto the new position');
 });
 
 test('moving pursuits, intentional windups, recovery, hitstun, and inactive fights never count as stuck',()=>{
   let moving=arena();moving.player.invulnerable=100;moving.enemies[0].z=17;moving.enemies[0].progressZ=17;
-  moving=frames(moving,120);assert.equal(moving.sounds.filter(e=>e.name==='swing').length,0);
+  moving=frames(moving,120);assert.equal(moving.sounds.filter(e=>e.name==='ranged-fire').length,0);
   for(const mode of ['windup','idle'] as const) {
     let s=trapBoss(arena());s.enemies[0].mode=mode;s.enemies[0].modeTime=2;s.enemies[0].stuckTime=.49;
-    s=frames(s,40);assert.equal(s.sounds.filter(e=>e.name==='swing').length,0);assert.equal(s.enemies[0].stuckTime,0);
+    s=frames(s,40);assert.equal(s.sounds.filter(e=>e.name==='ranged-fire').length,0);assert.equal(s.enemies[0].stuckTime,0);
   }
   let stunned=trapBoss(arena());stunned.enemies[0].hitstun=2;stunned.enemies[0].stuckTime=.49;
-  stunned=frames(stunned,40);assert.equal(stunned.sounds.filter(e=>e.name==='swing').length,0);
+  stunned=frames(stunned,40);assert.equal(stunned.sounds.filter(e=>e.name==='ranged-fire').length,0);
   let inactive=trapBoss(arena());inactive.player.z=12;inactive.enemies[0].stuckTime=.49;
   inactive=frames(inactive,120);assert.equal(inactive.projectiles.length,0);assert.equal(inactive.enemies[0].stuckTime,0);
 });
@@ -88,4 +101,40 @@ test('a paused game freezes the new pursuit timers and projectiles',()=>{
   const s=arena();s.projectiles=[shot(s)];s.phase='paused';
   const snapshot=JSON.stringify(s);
   assert.equal(stepGame(s,FIXED_DT,idle),s);assert.equal(JSON.stringify(s),snapshot);
+});
+
+
+test('a timed sword sweep reflects a bolt, which hurts the Guardian once',()=>{
+  let s=arena();s.player.x=10;s.player.z=24;s.player.facingX=0;s.player.facingZ=-1;
+  s.player.attackTime=.16;s.player.attackId=1;
+  s.enemies[0].mode='idle';s.enemies[0].modeTime=10;
+  s.projectiles=[shot(s,{x:10,z:22.9,vx:0,vz:7.2})];
+  s=frames(s,1);assert.equal(s.projectiles[0].reflected,true);
+  assert.ok(s.projectiles[0].vz<0);assert.equal(s.player.hp,6);
+  assert.equal(s.sounds.filter(e=>e.name==='ranged-parry').length,1);
+  s=frames(s,30);assert.equal(s.enemies[0].hp,7);assert.equal(s.projectiles.length,0);
+});
+
+test('a returned wisp can defeat the Guardian and unlock the treasure',()=>{
+  let s=arena();s.enemies[0].hp=1;s.enemies[0].mode='idle';s.enemies[0].modeTime=10;
+  s.projectiles=[shot(s,{x:10,z:21.1,vx:0,vz:-7.2,reflected:true})];
+  s=frames(s,5);assert.equal(s.enemies[0].hp,0);assert.equal(s.bossDefeated,true);
+  assert.equal(s.pickups.length,5);assert.equal(s.sounds.filter(e=>e.name==='death').length,1);
+});
+
+test('reflected wisps also die on walls and cannot be reflected through scenery',()=>{
+  let s=arena();s.enemies[0].mode='idle';s.enemies[0].modeTime=10;
+  s.projectiles=[shot(s,{x:3,z:20.5,reflected:true})];s=stepGame(s,.05,idle);
+  assert.equal(s.projectiles.length,0);assert.equal(s.enemies[0].hp,8);
+  s=arena();Object.assign(s.player,{x:5.1,z:20.5,facingX:-1,facingZ:0,attackTime:.16});
+  s.enemies[0].mode='idle';s.enemies[0].modeTime=10;
+  s.projectiles=[shot(s,{x:3.15,z:20.5})];s=frames(s,2);
+  assert.equal(s.sounds.filter(e=>e.name==='ranged-parry').length,0,'Stone blocks the sword from returning a bolt on the far side');
+  assert.equal(s.projectiles.length,0);
+});
+
+test('leaving the arena cancels a ranged warning and the next encounter starts fresh',()=>{
+  let s=trapBoss(arena());s=frames(s,30);assert.equal(s.enemies[0].mode,'ranged-windup');
+  s.player.z=12;s=frames(s,60);assert.equal(s.enemies[0].mode,'idle');
+  assert.equal(s.projectiles.length,0);assert.equal(s.sounds.filter(e=>e.name==='ranged-fire').length,0);
 });

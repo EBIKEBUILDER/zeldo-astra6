@@ -71,7 +71,7 @@ export default function Adventure() {
     window.addEventListener('keydown', handler, true);
     return () => window.removeEventListener('keydown', handler, true);
   }, [help]);
-  const quest = bossDefeated ? ['The last little light', 'The guardian rests. Open the ember chest.'] : gateOpen ? ['A keeper in the dark', 'Defeat the Hollow Guardian. Watch its charge.'] : hasKey ? ['A door worth opening', 'Use the old key at the northern gate.'] : zone === 'dungeon' ? ['Something left behind', 'Find the old key on the western pedestal.'] : ['Follow the forgotten path', 'Cross the river. Find the shrine to the northeast.'];
+  const quest = bossDefeated ? ['The last little light', 'The guardian rests. Open the ember chest.'] : gateOpen ? ['A keeper in the dark', 'Dodge its charge. Sidestep violet wisps—or swing to return them.'] : hasKey ? ['A door worth opening', 'Use the old key at the northern gate.'] : zone === 'dungeon' ? ['Something left behind', 'Find the old key on the western pedestal.'] : ['Follow the forgotten path', 'Cross the river. Find the shrine to the northeast.'];
   const touchButton = (action: Parameters<GameControls['virtual']>[0], label: string, content: React.ReactNode, extra = '') => <button aria-label={label} className={extra} onPointerDown={e => { e.preventDefault(); e.currentTarget.setPointerCapture(e.pointerId); controls.current?.virtual(action, true); }} onPointerUp={() => controls.current?.virtual(action, false)} onPointerCancel={() => controls.current?.virtual(action, false)} onLostPointerCapture={() => controls.current?.virtual(action, false)}>{content}</button>;
 
   return <div className="app-shell">

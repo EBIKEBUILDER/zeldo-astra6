@@ -388,7 +388,8 @@ export function createGameRenderer(canvas: HTMLCanvasElement) {
   const treasureGlow = cylinder('treasure-glow', 1.7, .9, 1.8, 0, 1.58, 0, '#ffdf80', chest, 8, false);
   treasureGlow.material = mat('#ffe3a0', .8, .17); treasureGlow.setEnabled(false);
 
-  const enemyNodes = new Map<string, { node: B.TransformNode; body: B.Mesh; eyes: B.Mesh[]; danger: B.Mesh | null; originals: Map<B.AbstractMesh, B.Material | null> }>();
+  type RangedCue = { node: B.TransformNode; halo: B.Mesh; orb: B.Mesh; runes: B.Mesh[]; aim: B.Mesh; target: B.Mesh };
+  const enemyNodes = new Map<string, { node: B.TransformNode; body: B.Mesh; eyes: B.Mesh[]; danger: B.Mesh | null; ranged: RangedCue | null; originals: Map<B.AbstractMesh, B.Material | null> }>();
   const breakableNodes = new Map<string, B.TransformNode>();
   const pickupNodes = new Map<string, B.TransformNode>();
   const projectileNodes = new Map<number, { node: B.TransformNode; core: B.Mesh; halo: B.Mesh; tails: B.Mesh[] }>();
@@ -407,6 +408,25 @@ export function createGameRenderer(canvas: HTMLCanvasElement) {
     const model = { node, core, halo, tails };
     projectileNodes.set(id, model);
     return model;
+  }
+  function rangedCue(): RangedCue {
+    // This lives at floor height, separately from the Guardian's animated body.
+    const node = group('guardian-wisp-warning');
+    const halo = ring('wisp-gathering-ring', 1.4, .055, 0, .065, 0, '#ae8bed', node);
+    halo.material = mat('#ae8bed', .85, .8);
+    const orb = diamond('gathering-wisp', 0, 1.04, 1.14, '#d9c7ff', node, .23, .95);
+    const runes = [0, 1, 2, 3].map(() => {
+      const rune = diamond('gathering-rune', 0, .09, 0, '#cab1ff', node, .13, .85);
+      rune.scaling.set(1, .2, 1);
+      return rune;
+    });
+    const aim = box('locked-wisp-aim', .13, .025, 1, 0, .06, 0, '#b79af0', node, false);
+    aim.material = mat('#b79af0', .75, .5);
+    const target = ring('locked-wisp-target', .44, .045, 0, .075, 0, '#d2bdff', node);
+    target.material = mat('#d2bdff', .8, .8);
+    node.getChildMeshes().forEach(mesh => { mesh.receiveShadows = false; });
+    node.setEnabled(false);
+    return { node, halo, orb, runes, aim, target };
   }
   function enemyNode(id: string, boss: boolean) {
     const node = group(boss ? 'ember-guardian' : 'moss-slime');
@@ -432,8 +452,9 @@ export function createGameRenderer(canvas: HTMLCanvasElement) {
     }
     const danger = boss ? ring('charge-warning', 1.55, .09, 0, .055, 0, '#e6a063', node) : null;
     if (danger) { danger.material = mat('#efa567', .55, .7); danger.setEnabled(false); }
+    const ranged = boss ? rangedCue() : null;
     const originals = new Map<B.AbstractMesh, B.Material | null>(); node.getChildMeshes().forEach(mesh => originals.set(mesh, mesh.material));
-    const result = { node, body, eyes, danger, originals }; enemyNodes.set(id, result);
+    const result = { node, body, eyes, danger, ranged, originals }; enemyNodes.set(id, result);
     for (const mesh of node.getChildMeshes()) shadows.addShadowCaster(mesh);
     return result;
   }
@@ -508,9 +529,13 @@ export function createGameRenderer(canvas: HTMLCanvasElement) {
     for (const enemy of state.enemies) {
       const model = enemyNodes.get(enemy.id) ?? enemyNode(enemy.id, enemy.kind === 'boss');
       const enabled = enemy.zone === activeZone && enemy.hp > 0;
+      const rangedWindup = enemy.mode === 'ranged-windup';
+      model.ranged?.node.setEnabled(enabled && rangedWindup);
       model.node.setEnabled(enabled); if (!enabled) continue;
       model.node.position.set(enemy.x, Math.abs(Math.sin(time * (enemy.mode === 'chase' ? 10 : 3) + enemy.spawnX)) * .055, enemy.z);
-      const angle = enemy.kind === 'blob' ? Math.atan2(enemy.facingX, enemy.facingZ) : Math.atan2(p.x - enemy.x, p.z - enemy.z);
+      const angle = enemy.kind === 'blob' ? Math.atan2(enemy.facingX, enemy.facingZ)
+        : rangedWindup ? Math.atan2(enemy.rangedAimX - enemy.x, enemy.rangedAimZ - enemy.z)
+        : Math.atan2(p.x - enemy.x, p.z - enemy.z);
       model.node.rotation.y = angle;
       const bounce = Math.sin(time * (enemy.kind === 'boss' ? 7 : 5) + enemy.spawnX) * .035;
       model.body.scaling.y = (enemy.mode === 'windup' ? .57 : .73) + bounce;
@@ -520,6 +545,30 @@ export function createGameRenderer(canvas: HTMLCanvasElement) {
       }
       model.node.scaling.setAll(enemy.mode === 'windup' ? 1 + Math.sin(time * 33) * .035 : 1);
       model.originals.forEach((original, mesh) => { mesh.material = enemy.flash > 0 ? mat('#fff5d5', .3) : original; });
+      if (model.ranged && rangedWindup) {
+        const cue = model.ranged;
+        const progress = Math.max(0, Math.min(1, 1 - enemy.modeTime / .8));
+        const aimDistance = Math.hypot(enemy.rangedAimX - enemy.x, enemy.rangedAimZ - enemy.z);
+        cue.node.position.set(enemy.x, 0, enemy.z);
+        cue.node.rotation.y = angle;
+        cue.halo.scaling.setAll(1 - progress * .35);
+        cue.halo.visibility = .55 + progress * .45;
+        cue.orb.scaling.set(.75, 1.2, .75).scaleInPlace(.25 + progress * .95);
+        cue.orb.rotation.set(progress * 2, progress * 4, progress * 2);
+        cue.runes.forEach((rune, i) => {
+          const orbit = i * Math.PI / 2 + progress * .9;
+          const radius = 1.7 - progress * .85;
+          rune.position.set(Math.sin(orbit) * radius, .09 + progress * .35, Math.cos(orbit) * radius);
+          rune.rotation.y = orbit;
+          rune.visibility = .5 + progress * .5;
+        });
+        const lineStart = Math.min(1.2, aimDistance);
+        cue.aim.scaling.z = Math.max(.001, aimDistance - lineStart);
+        cue.aim.position.z = (aimDistance + lineStart) / 2;
+        cue.aim.visibility = .6 + progress * .4;
+        cue.target.position.z = aimDistance;
+        cue.target.scaling.setAll(1.25 - progress * .25);
+      }
     }
     for (const item of state.breakables) {
       let node = breakableNodes.get(item.id);
@@ -557,9 +606,12 @@ export function createGameRenderer(canvas: HTMLCanvasElement) {
       model.node.position.set(item.x, .72, item.z);
       model.node.rotation.y = Math.atan2(item.vx, item.vz);
       model.node.scaling.setAll(item.radius / .18);
+      model.core.material = mat(item.reflected ? '#eaffce' : '#ccf4ff', .95);
+      model.halo.material = mat(item.reflected ? '#eed18b' : '#aa89ed', .8, .8);
       model.core.rotation.set(item.age * 7, item.age * 5, item.age * 3);
       model.halo.scaling.setAll(1 + Math.sin(item.age * 18) * .09);
       model.tails.forEach((tail, i) => {
+        tail.material = mat(item.reflected ? '#a5e5bc' : '#8ec6ff', .7);
         tail.position.x = Math.sin(item.age * 16 - i * .9) * .045;
         tail.rotation.z = item.age * 5 + i;
         tail.scaling.z = 1.55 * Math.min(1, item.age / .12);

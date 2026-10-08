@@ -115,6 +115,30 @@ export class GameAudio {
         this.tone(170, 0.13, 'square', 0.2, 0, 55);
         this.tone(840, 0.07, 'triangle', 0.22);
         break;
+      case 'ranged-charge':
+        // A rising, three-beat breath gives the locked shot a recognizable cue.
+        this.tone(196, .78, 'sine', .23, 0, 784);
+        this.tone(293.66, .73, 'triangle', .12, .04, 1174.66);
+        [392, 554.37, 783.99].forEach((note, i) => {
+          this.tone(note, .19, 'sine', .16 + i * .025, .12 + i * .23);
+        });
+        this.noise(.72, .11, 280, 1800);
+        break;
+      case 'ranged-fire':
+        this.tone(1046.5, .23, 'triangle', .3, 0, 196);
+        this.tone(523.25, .30, 'sine', .22, .015, 98);
+        this.noise(.18, .28, 2400, 650);
+        break;
+      case 'ranged-parry':
+        this.tone(1567.98, .28, 'triangle', .38, 0, 2093);
+        this.tone(2349.32, .20, 'sine', .22, .025);
+        this.tone(3135.96, .12, 'sine', .12, .045);
+        this.noise(.055, .24, 4400, 1900);
+        break;
+      case 'ranged-impact':
+        this.tone(392, .17, 'triangle', .21, 0, 98);
+        this.noise(.13, .24, 1500, 250);
+        break;
       case 'death':
         this.tone(240, 0.28, 'triangle', 0.42, 0, 48);
         this.noise(0.28, 0.4, 900, 130);

@@ -26,10 +26,10 @@ test('a charge pinned against an existing pillar can fire its stalled fallback',
   for(let frame=0;frame<13;frame++)s=stepGame(s,FIXED_DT,dodge);
   let chargeFrames=0;
   let fired=false;
-  for(let frame=0;frame<70;frame++) {
+  for(let frame=0;frame<120;frame++) {
     s=stepGame(s,FIXED_DT,idle);
     if(s.enemies[0].mode==='charge')chargeFrames++;
-    if(s.sounds.some(sound=>sound.name==='swing')) {
+    if(s.sounds.some(sound=>sound.name==='ranged-fire')) {
       assert.ok(chargeFrames>=30,'The fallback waits for about half a second of failed movement');
       assert.ok(Math.hypot(s.enemies[0].x-s.player.x,s.enemies[0].z-s.player.z)>1.29);
       assert.ok(s.enemies[0].rangedCooldown>2.9);
@@ -47,7 +47,7 @@ test('the original arena provides a real stalled-pursuit fallback without an art
   let fired=false;
   for(let frame=0;frame<420;frame++) {
     s=stepGame(s,FIXED_DT,idle);
-    if(s.sounds.some(sound=>sound.name==='swing')) {
+    if(s.sounds.some(sound=>sound.name==='ranged-fire')) {
       fired=true;
       assert.ok(s.enemies[0].rangedCooldown>2.9);
       break;
