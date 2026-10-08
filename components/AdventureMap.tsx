@@ -33,12 +33,21 @@ function ObjectiveMarker({ objective, height }: { objective: Objective; height: 
   </g>;
 }
 
-export default function AdventureMap({ expanded, onExpand, onClose }: MapProps) {
-  const zone = useGameStore(s => s.zone);
-  const area = useGameStore(s => s.area);
+// Movement updates only the small marker subtree; map labels, controls and
+// objective artwork do not need React reconciliation on each position tick.
+const PlayerMarker = memo(function PlayerMarker({ height }: { height: number }) {
   const x = useGameStore(s => Math.round(s.player.x * 4) / 4);
   const z = useGameStore(s => Math.round(s.player.z * 4) / 4);
   const facing = useGameStore(s => Math.atan2(s.player.facingX, s.player.facingZ) * 180 / Math.PI);
+  return <g transform={`translate(${x} ${height - z})`} aria-hidden="true">
+    <circle r="1.15" fill="#fffbed" stroke="#304f43" strokeWidth=".25" />
+    <path d="M0 -1.45 L.7 .75 L0 .35 L-.7 .75Z" transform={`rotate(${facing})`} fill="#355e4b" stroke="#fffbed" strokeWidth=".15" />
+  </g>;
+});
+
+export default function AdventureMap({ expanded, onExpand, onClose }: MapProps) {
+  const zone = useGameStore(s => s.zone);
+  const area = useGameStore(s => s.area);
   const hasKey = useGameStore(s => s.hasKey);
   const gateOpen = useGameStore(s => s.gateOpen);
   const bossDefeated = useGameStore(s => s.bossDefeated);
@@ -81,10 +90,7 @@ export default function AdventureMap({ expanded, onExpand, onClose }: MapProps) 
   const map = (large: boolean) => <svg className={`map-world${large ? ' map-world-large' : ''}`} viewBox={`0 0 ${world.width} ${world.height}`} role="img" aria-label={`${title}. You are in ${area}. Your objective is ${objective.label}. North is up.`}>
     <MapTerrain zone={zone} gateOpen={gateOpen} />
     <ObjectiveMarker objective={objective} height={world.height} />
-    <g transform={`translate(${x} ${world.height - z})`} aria-hidden="true">
-      <circle r="1.15" fill="#fffbed" stroke="#304f43" strokeWidth=".25" />
-      <path d="M0 -1.45 L.7 .75 L0 .35 L-.7 .75Z" transform={`rotate(${facing})`} fill="#355e4b" stroke="#fffbed" strokeWidth=".15" />
-    </g>
+    <PlayerMarker height={world.height} />
   </svg>;
 
   return <>

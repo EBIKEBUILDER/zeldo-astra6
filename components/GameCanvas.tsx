@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useGameStore } from '@/game/store';
 import { GameAudio } from '@/game/audio';
 import { createInput } from '@/game/input';
+import { createFrameStats } from '@/game/frame-stats';
 
 export type GameControls = {
   start: () => void;
@@ -16,6 +17,8 @@ export type GameControls = {
 
 export default function GameCanvas({ onReady }: { onReady: (controls: GameControls) => void }) {
   const canvas = useRef<HTMLCanvasElement>(null);
+  const fps = useRef<HTMLSpanElement>(null);
+  const phase = useGameStore(s => s.phase);
   const [error, setError] = useState('');
   useEffect(() => {
     let disposed = false;
@@ -40,6 +43,8 @@ export default function GameCanvas({ onReady }: { onReady: (controls: GameContro
       const resize = new ResizeObserver(() => renderer.resize());
       resize.observe(canvas.current);
       let last = performance.now(), accumulator = 0, frame = 0;
+      const stats = createFrameStats();
+      stats.reset(last);
       const loop = (now: number) => {
         const dt = Math.min((now - last) / 1000, 0.1);
         last = now;
@@ -54,10 +59,25 @@ export default function GameCanvas({ onReady }: { onReady: (controls: GameContro
         audio.setMuted(current.muted);
         current.sounds.forEach(event => { if (event.id > soundId) { audio.play(event.name); soundId = event.id; } });
         renderer.render(current, dt);
+        const sample = stats.record(now, renderer.drawCalls());
+        if (sample && fps.current) {
+          fps.current.textContent = `${sample.fps} FPS`;
+          fps.current.title = `${sample.drawCalls} draw calls per frame, including shadows`;
+        }
         frame = requestAnimationFrame(loop);
       };
-      frame = requestAnimationFrame(loop);
-      const visibility = () => { if (document.hidden) { input.clear(); if (useGameStore.getState().phase === 'playing') useGameStore.getState().togglePause(); } };
+      if (!document.hidden) frame = requestAnimationFrame(loop);
+      const visibility = () => {
+        if (document.hidden) {
+          cancelAnimationFrame(frame);
+          input.clear();
+          if (useGameStore.getState().phase === 'playing') useGameStore.getState().togglePause();
+        } else {
+          cancelAnimationFrame(frame);
+          last = performance.now(); accumulator = 0; stats.reset(last);
+          frame = requestAnimationFrame(loop);
+        }
+      };
       document.addEventListener('visibilitychange', visibility);
       void renderer.ready().then(() => {
         if (!disposed) onReady({
@@ -82,5 +102,5 @@ export default function GameCanvas({ onReady }: { onReady: (controls: GameContro
     });
     return () => { disposed = true; cleanup?.(); };
   }, [onReady]);
-  return <><canvas ref={canvas} className="world-canvas" aria-label="Zeldo 3D adventure. Move with WASD, arrow keys, or the touch joystick. Swing with Space or the Sword button; interact with E or the action button." tabIndex={0} />{error && <div className="render-error"><h2>The valley couldn’t wake up.</h2><p>{error}</p><p>Enable hardware acceleration or try another browser, then refresh.</p></div>}</>;
+  return <><canvas ref={canvas} className="world-canvas" aria-label="Zeldo 3D adventure. Move with WASD, arrow keys, or the touch joystick. Swing with Space or the Sword button; interact with E or the action button." tabIndex={0} /><span ref={fps} className="fps-counter" hidden={phase !== 'playing' && phase !== 'paused'} aria-label="Frames per second">— FPS</span>{error && <div className="render-error"><h2>The valley couldn’t wake up.</h2><p>{error}</p><p>Enable hardware acceleration or try another browser, then refresh.</p></div>}</>;
 }

@@ -2,12 +2,16 @@ import * as B from '@babylonjs/core';
 import type { GameData, Zone, Obstacle, Decoration } from './types';
 import { WORLDS } from './world';
 import { getCameraFraming, getGameplayCameraTarget } from './camera';
+import { mergeOpaqueMeshes } from './render-batching';
 
 /** Babylon is deliberately a projection of the serializable simulation. */
 export function createGameRenderer(canvas: HTMLCanvasElement) {
   const engine = new B.Engine(canvas, true, { stencil: true, powerPreference: 'high-performance', preserveDrawingBuffer: false });
   engine.setHardwareScalingLevel(Math.max(1, (window.devicePixelRatio || 1) / 1.7));
   const scene = new B.Scene(engine);
+  // Input is handled by the game; Babylon has no pickable scene interactions.
+  scene.skipPointerMovePicking = scene.skipPointerDownPicking = scene.skipPointerUpPicking = true;
+  const instrumentation = new B.SceneInstrumentation(scene);
   scene.clearColor = B.Color4.FromHexString('#d3ddaeff');
   scene.ambientColor = B.Color3.Black();
   scene.imageProcessingConfiguration.exposure = .94;
@@ -43,12 +47,10 @@ export function createGameRenderer(canvas: HTMLCanvasElement) {
   };
   const C = { grass: '#91ad68', darkGrass: '#789554', paleGrass: '#9eb672', pine: '#35694f', pineLight: '#4f8256', pineDark: '#285641', trunk: '#7c5a3e', dirt: '#d3bc80', stone: '#8c9383', stoneDark: '#69776e', stoneLight: '#a9af9b', wood: '#9d7950', woodLight: '#c5a474', cream: '#f0dfb4', orange: '#dc8248', water: '#70afa5', gold: '#efd17a', dungeon: '#535e59' };
   let serial = 0;
-  const shadowCasters: B.AbstractMesh[] = [];
   function finish(mesh: B.Mesh, color: string, parent?: B.Node, cast = true, glow = 0) {
     mesh.material = mat(color, glow); mesh.isPickable = false; mesh.receiveShadows = true;
     mesh.metadata = { castsShadow: cast };
     if (parent) mesh.parent = parent;
-    if (cast) shadowCasters.push(mesh);
     return mesh;
   }
   function box(name: string, w: number, h: number, d: number, x: number, y: number, z: number, color: string, parent?: B.Node, cast = true) {
@@ -311,24 +313,27 @@ export function createGameRenderer(canvas: HTMLCanvasElement) {
       box('gate-lintel', 4.25, .35, 1.15, 10, 2.75, 14, C.stone, root);
       for (let i = 0; i < 3; i++) box('exit-step', 3.3 - i * .15, .12, .6, 10, .04 + i * .08, 1.45 + i * .48, C.stoneLight, root);
     }
-    // Merge all static geometry by material. The unmerged transform hierarchy remains
-    // useful for the few animated water glints and flames, but costs no draw calls.
+    // Bake the original geometry and palette once. Animated details stay independent.
     const animated = new Set<B.AbstractMesh>([...waterGlints, ...flames]);
-    const byMaterial = new Map<string, { meshes: B.Mesh[]; cast: boolean }>();
-    root.getChildMeshes().forEach(mesh => {
-      if (!(mesh instanceof B.Mesh) || !mesh.material || animated.has(mesh)) return;
-      const cast = Boolean(mesh.metadata?.castsShadow);
-      const key = `${mesh.material.uniqueId}:${cast}`;
-      const batch = byMaterial.get(key) ?? { meshes: [], cast }; batch.meshes.push(mesh); byMaterial.set(key, batch);
-    });
-    byMaterial.forEach(({ meshes, cast }) => {
-      if (meshes.length < 2) return;
-      const merged = B.Mesh.MergeMeshes(meshes, true, true, undefined, false, false);
-      if (merged) { merged.parent = root; merged.isPickable = false; merged.receiveShadows = true; if (cast) shadowCasters.push(merged); }
-    });
+    const meshes = root.getChildMeshes().filter((mesh): mesh is B.Mesh => mesh instanceof B.Mesh && !animated.has(mesh));
+    mergeOpaqueMeshes(root, meshes, { freezeWorldMatrix: true, preserveNormals: false });
     root.setEnabled(zone === 'overworld');
   }
   buildWorld('overworld'); buildWorld('dungeon');
+
+  // Ripples share geometry/material and differ only in opacity. Vertex alpha
+  // keeps every original shimmer while submitting the river details together.
+  const glintVertexCounts = waterGlints.map(mesh => mesh.getTotalVertices());
+  const glintMesh = B.Mesh.MergeMeshes(waterGlints, true, true, undefined, false, false)!;
+  glintMesh.parent = worlds.overworld;
+  glintMesh.isPickable = false; glintMesh.receiveShadows = true;
+  glintMesh.hasVertexAlpha = true;
+  // Floor shimmer belongs behind elevated translucent particles and sword trails.
+  glintMesh.alphaIndex = -1;
+  const glintColors = new Float32Array(glintMesh.getTotalVertices() * 4).fill(1);
+  glintMesh.setVerticesData(B.VertexBuffer.ColorKind, glintColors, true);
+  glintMesh.freezeWorldMatrix();
+  waterGlints.length = 0;
 
   const hero = group('little-fernkeeper');
   const heroBody = group('hero-body', 0, 0, hero);
@@ -390,11 +395,18 @@ export function createGameRenderer(canvas: HTMLCanvasElement) {
   treasureGlow.material = mat('#ffe3a0', .8, .17); treasureGlow.setEnabled(false);
 
   type RangedCue = { node: B.TransformNode; halo: B.Mesh; orb: B.Mesh; runes: B.Mesh[]; aim: B.Mesh; target: B.Mesh };
-  const enemyNodes = new Map<string, { node: B.TransformNode; body: B.Mesh; eyes: B.Mesh[]; danger: B.Mesh | null; ranged: RangedCue | null; originals: Map<B.AbstractMesh, B.Material | null> }>();
+  const enemyNodes = new Map<string, { node: B.TransformNode; body: B.Mesh; eyes: B.Mesh[]; danger: B.Mesh | null; ranged: RangedCue | null; originals: Map<B.AbstractMesh, B.Material | null>; flashing: boolean }>();
   const breakableNodes = new Map<string, B.TransformNode>();
   const pickupNodes = new Map<string, B.TransformNode>();
   const projectileNodes = new Map<number, { node: B.TransformNode; core: B.Mesh; halo: B.Mesh; tails: B.Mesh[] }>();
   const particleNodes = new Map<number, B.Mesh>();
+  const particlePool: Record<'poof' | 'box', B.Mesh[]> = { poof: [], box: [] };
+  const livePickupIds = new Set<string>(), liveProjectileIds = new Set<number>(), liveParticleIds = new Set<number>();
+  function recycleParticle(mesh: B.Mesh) {
+    mesh.setEnabled(false);
+    const pool = particlePool[mesh.metadata.particleShape as 'poof' | 'box'];
+    if (pool.length < 96) pool.push(mesh); else mesh.dispose();
+  }
   function projectileNode(id: number) {
     const node = group('guardian-wisp');
     const core = finish(B.MeshBuilder.CreatePolyhedron(`wisp-core-${serial++}`, { type: 1, size: .18 }, scene), '#ccf4ff', node, false, .95);
@@ -454,8 +466,9 @@ export function createGameRenderer(canvas: HTMLCanvasElement) {
     const danger = boss ? ring('charge-warning', 1.55, .09, 0, .055, 0, '#e6a063', node) : null;
     if (danger) { danger.material = mat('#efa567', .55, .7); danger.setEnabled(false); }
     const ranged = boss ? rangedCue() : null;
+    mergeOpaqueMeshes(node, node.getChildMeshes().filter((mesh): mesh is B.Mesh => mesh instanceof B.Mesh && mesh !== body && mesh !== danger));
     const originals = new Map<B.AbstractMesh, B.Material | null>(); node.getChildMeshes().forEach(mesh => originals.set(mesh, mesh.material));
-    const result = { node, body, eyes, danger, ranged, originals }; enemyNodes.set(id, result);
+    const result = { node, body, eyes, danger, ranged, originals, flashing: false }; enemyNodes.set(id, result);
     for (const mesh of node.getChildMeshes()) shadows.addShadowCaster(mesh);
     return result;
   }
@@ -476,7 +489,16 @@ export function createGameRenderer(canvas: HTMLCanvasElement) {
     for(let i=0;i<8;i++){const j=(i+1)%8;indices.push(0,2+j,2+i,1,10+i,10+j,2+i,2+j,10+i,2+j,10+j,10+i);}
     const data = new B.VertexData();data.positions=positions;data.indices=indices; const normals:number[]=[];B.VertexData.ComputeNormals(positions,indices,normals);data.normals=normals;data.applyToMesh(mesh);finish(mesh,'#d16e50',parent,false,.14);mesh.convertToFlatShadedMesh();return mesh;
   }
-  for (const caster of shadowCasters) if (!caster.isDisposed()) shadows.addShadowCaster(caster);
+  // Keep the hero's pieces separate: invulnerability makes them transparent,
+  // requiring the original per-piece sorting. Batch other rigid model parts.
+  for (const root of [keyNode, gate, chestLid]) mergeOpaqueMeshes(root, root.getChildMeshes() as B.Mesh[]);
+  mergeOpaqueMeshes(chest, chest.getChildMeshes(true).filter((mesh): mesh is B.Mesh => mesh instanceof B.Mesh && mesh !== treasureGlow));
+  const heroMeshes = hero.getChildMeshes();
+  for (const mesh of scene.meshes) if (mesh.metadata?.castsShadow) shadows.addShadowCaster(mesh, false);
+  const cameraTarget = new B.Vector3();
+  let heroVisibility = 1;
+  let lastBreakables: GameData['breakables'] | null = null;
+  let breakableZone: Zone | null = null;
   let activeZone: Zone = 'overworld';
   let cameraX = 3, cameraZ = 8;
   let smoothGate = 0, smoothLid = 0;
@@ -511,7 +533,8 @@ export function createGameRenderer(canvas: HTMLCanvasElement) {
     cameraX += (targetX - cameraX) * smoothing; cameraZ += (targetZ - cameraZ) * smoothing;
     const shakeX = Math.sin(time * 135) * state.shake * .32, shakeZ = Math.cos(time * 111) * state.shake * .28;
     camera.position.set(cameraX + shakeX, 23, cameraZ - 19 + shakeZ);
-    camera.setTarget(new B.Vector3(cameraX + shakeX, 0, cameraZ + shakeZ));
+    cameraTarget.set(cameraX + shakeX, 0, cameraZ + shakeZ);
+    camera.setTarget(cameraTarget);
     sun.position.set(cameraX + 12, 32, cameraZ - 18);
     hero.position.set(p.x, 0, p.z); hero.rotation.y = title ? Math.PI - .4 : Math.atan2(p.facingX, p.facingZ);
     const moving = Math.hypot(p.vx, p.vz) > .15;
@@ -519,7 +542,11 @@ export function createGameRenderer(canvas: HTMLCanvasElement) {
     heroBody.position.y = moving ? Math.abs(stride) * .048 : Math.sin(time * 2.5) * .012;
     leftBoot.position.z = stride * .14; rightBoot.position.z = -stride * .14;
     scarf.rotation.x = Math.sin(time * 8) * (moving ? .2 : .05);
-    hero.getChildMeshes().forEach(mesh => { mesh.visibility = p.invulnerable > 0 && Math.floor(p.invulnerable * 16) % 2 === 0 ? .38 : 1; });
+    const visibility = p.invulnerable > 0 && Math.floor(p.invulnerable * 16) % 2 === 0 ? .38 : 1;
+    if (visibility !== heroVisibility) {
+      heroVisibility = visibility;
+      for (const mesh of heroMeshes) mesh.visibility = visibility;
+    }
     const attacking = p.attackTime > 0;
     swordPivot.position.x = attacking ? 0 : .37;
     swordPivot.position.z = attacking ? 0 : -.16;
@@ -545,7 +572,11 @@ export function createGameRenderer(canvas: HTMLCanvasElement) {
         model.danger.scaling.setAll(enemy.mode === 'windup' ? 1 + Math.sin(time * 17) * .12 : .9);
       }
       model.node.scaling.setAll(enemy.mode === 'windup' ? 1 + Math.sin(time * 33) * .035 : 1);
-      model.originals.forEach((original, mesh) => { mesh.material = enemy.flash > 0 ? mat('#fff5d5', .3) : original; });
+      const flashing = enemy.flash > 0;
+      if (flashing !== model.flashing) {
+        model.flashing = flashing;
+        model.originals.forEach((original, mesh) => { mesh.material = flashing ? mat('#fff5d5', .3) : original; mesh.useVertexColors = !flashing; });
+      }
       if (model.ranged && rangedWindup) {
         const cue = model.ranged;
         const progress = Math.max(0, Math.min(1, 1 - enemy.modeTime / .8));
@@ -571,18 +602,24 @@ export function createGameRenderer(canvas: HTMLCanvasElement) {
         cue.target.scaling.setAll(1.25 - progress * .25);
       }
     }
-    for (const item of state.breakables) {
-      let node = breakableNodes.get(item.id);
-      if (!node) {
-        node = group(`breakable-${item.kind}`, item.x, item.z);
-        if (item.kind === 'grass') { grass(-.18, -.12, .5, node, '#557c45', 1.42); grass(.18, .12, 2, node, '#688b4c', 1.20); }
-        else { pot(node); for (const mesh of node.getChildMeshes()) shadows.addShadowCaster(mesh); }
-        breakableNodes.set(item.id, node);
+    if (state.breakables !== lastBreakables || activeZone !== breakableZone) {
+      lastBreakables = state.breakables; breakableZone = activeZone;
+      for (const item of state.breakables) {
+        let node = breakableNodes.get(item.id);
+        if (!node) {
+          node = group(`breakable-${item.kind}`, item.x, item.z);
+          if (item.kind === 'grass') { grass(-.18, -.12, .5, node, '#557c45', 1.42); grass(.18, .12, 2, node, '#688b4c', 1.20); }
+          else pot(node);
+          const meshes = mergeOpaqueMeshes(node, node.getChildMeshes() as B.Mesh[], { freezeWorldMatrix: true });
+          if (item.kind === 'pot') for (const mesh of meshes) shadows.addShadowCaster(mesh, false);
+          breakableNodes.set(item.id, node);
+        }
+        node.setEnabled(item.zone === activeZone && !item.broken);
       }
-      node.setEnabled(item.zone === activeZone && !item.broken);
     }
-    const pickupIds = new Set(state.pickups.map(item => item.id));
-    pickupNodes.forEach((node, id) => { if (!pickupIds.has(id)) { node.dispose(); pickupNodes.delete(id); } });
+    livePickupIds.clear();
+    for (const item of state.pickups) livePickupIds.add(item.id);
+    pickupNodes.forEach((node, id) => { if (!livePickupIds.has(id)) { node.dispose(); pickupNodes.delete(id); } });
     for (const item of state.pickups) {
       let node = pickupNodes.get(item.id);
       if (!node) {
@@ -599,10 +636,11 @@ export function createGameRenderer(canvas: HTMLCanvasElement) {
     }
     // Only project the simulation's live shots; removed or off-zone shots release
     // their geometry immediately, including when the adventure is restarted.
-    const visibleProjectiles = state.projectiles.filter(item => item.zone === activeZone);
-    const projectileIds = new Set(visibleProjectiles.map(item => item.id));
-    projectileNodes.forEach((model, id) => { if (!projectileIds.has(id)) { model.node.dispose(); projectileNodes.delete(id); } });
-    for (const item of visibleProjectiles) {
+    liveProjectileIds.clear();
+    for (const item of state.projectiles) if (item.zone === activeZone) liveProjectileIds.add(item.id);
+    projectileNodes.forEach((model, id) => { if (!liveProjectileIds.has(id)) { model.node.dispose(); projectileNodes.delete(id); } });
+    for (const item of state.projectiles) {
+      if (item.zone !== activeZone) continue;
       const model = projectileNodes.get(item.id) ?? projectileNode(item.id);
       model.node.position.set(item.x, .72, item.z);
       model.node.rotation.y = Math.atan2(item.vx, item.vz);
@@ -618,14 +656,19 @@ export function createGameRenderer(canvas: HTMLCanvasElement) {
         tail.scaling.z = 1.55 * Math.min(1, item.age / .12);
       });
     }
-    const particleIds = new Set(state.particles.map(item => item.id));
-    particleNodes.forEach((mesh, id) => { if (!particleIds.has(id)) { mesh.dispose(); particleNodes.delete(id); } });
+    liveParticleIds.clear();
+    for (const item of state.particles) liveParticleIds.add(item.id);
+    particleNodes.forEach((mesh, id) => { if (!liveParticleIds.has(id)) { recycleParticle(mesh); particleNodes.delete(id); } });
     for (const item of state.particles) {
       let mesh = particleNodes.get(item.id);
+      const shape = item.kind === 'poof' ? 'poof' : 'box';
+      if (mesh && mesh.metadata.particleShape !== shape) { recycleParticle(mesh); mesh = undefined; }
       if (!mesh) {
-        mesh = item.kind === 'poof' ? ball('poof', 1, 0, 0, 0, item.color, undefined, undefined, false) : box('impact', 1, 1, 1, 0, 0, 0, item.color, undefined, false);
-        mesh.material = mat(item.color, item.kind === 'spark' ? .5 : 0); particleNodes.set(item.id, mesh);
+        mesh = particlePool[shape].pop() ?? (shape === 'poof' ? ball('poof', 1, 0, 0, 0, item.color, undefined, undefined, false) : box('impact', 1, 1, 1, 0, 0, 0, item.color, undefined, false));
+        mesh.metadata.particleShape = shape;
+        mesh.setEnabled(true); particleNodes.set(item.id, mesh);
       }
+      mesh.material = mat(item.color, item.kind === 'spark' ? .5 : 0);
       mesh.position.set(item.x, item.y, item.z);
       const fade = Math.max(0, item.life / item.maxLife);
       mesh.scaling.setAll(item.size * (item.kind === 'poof' ? 1.7 - fade * .7 : .65 + fade * .35));
@@ -636,10 +679,17 @@ export function createGameRenderer(canvas: HTMLCanvasElement) {
     smoothGate += ((state.gateOpen ? 3.2 : 0) - smoothGate) * (1 - Math.exp(-dt * 5)); gate.position.y = smoothGate; gate.setEnabled(smoothGate < 3.1);
     smoothLid += ((state.chestOpen ? 1.28 : 0) - smoothLid) * (1 - Math.exp(-dt * 7)); chestLid.rotation.x = smoothLid;
     treasureGlow.setEnabled(state.bossDefeated); treasureGlow.visibility = .65 + Math.sin(time * 3) * .2;
-    waterGlints.forEach((mesh, i) => { mesh.visibility = .4 + (Math.sin(time * 1.4 + i * 1.7) + 1) * .23; });
-    flames.forEach((mesh, i) => { mesh.scaling.y = 1.2 + Math.sin(time * 13 + i) * .25; mesh.rotation.z = Math.sin(time * 9 + i) * .12; });
+    if (activeZone === 'overworld') {
+      let offset = 3;
+      for (let i = 0; i < glintVertexCounts.length; i++) {
+        const alpha = .4 + (Math.sin(time * 1.4 + i * 1.7) + 1) * .23;
+        for (let vertex = 0; vertex < glintVertexCounts[i]; vertex++, offset += 4) glintColors[offset] = alpha;
+      }
+      glintMesh.updateVerticesData(B.VertexBuffer.ColorKind, glintColors, false, false);
+    }
+    if (activeZone === 'dungeon') flames.forEach((mesh, i) => { mesh.scaling.y = 1.2 + Math.sin(time * 13 + i) * .25; mesh.rotation.z = Math.sin(time * 9 + i) * .12; });
     scene.render();
   }
-  function dispose() { scene.dispose(); engine.dispose(); }
-  return { render, resize, dispose, ready: () => scene.whenReadyAsync() };
+  function dispose() { instrumentation.dispose(); scene.dispose(); engine.dispose(); }
+  return { render, resize, dispose, drawCalls: () => instrumentation.drawCallsCounter.current, ready: () => scene.whenReadyAsync() };
 }

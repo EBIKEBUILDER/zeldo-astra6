@@ -30,7 +30,7 @@ export function createInitialData(muted = false): GameData {
   return {phase:'title',zone:'overworld',player:{...p,vx:0,vz:0,facingX:0,facingZ:1,hp:6,maxHp:6,invulnerable:0,attackTime:0,attackCooldown:0,attackId:0,knockX:0,knockZ:0},enemies,breakables,pickups:[],particles:[],projectiles:[],sounds:[],elapsed:0,rupees:0,hasKey:false,gateOpen:false,bossDefeated:false,chestOpen:false,area:areaName('overworld',p),message:'',messageTime:0,shake:0,damageFlash:0,muted,seed:72819,eventId:0,visited:["Willow’s Rest"]};
 }
 function random(s: GameData) { s.seed=(Math.imul(s.seed,1664525)+1013904223)>>>0;return s.seed/4294967296; }
-function sound(s: GameData, name: SoundName) { s.sounds.push({id:++s.eventId,name});if(s.sounds.length>28)s.sounds.splice(0,s.sounds.length-28); }
+function sound(s: GameData, name: SoundName) { s.sounds=[...s.sounds.slice(-27),{id:++s.eventId,name}]; }
 function message(s: GameData, text: string, seconds = 4) { s.message=text;s.messageTime=seconds; }
 function burst(s: GameData, p: Point, kind: Particle['kind'], color: string, count: number) {
   for(let i=0;i<count;i++) {
@@ -95,7 +95,7 @@ function navigationSpace(s: GameData,e: Enemy,obstacles: Obstacle[]): Navigation
   };
 }
 function resetProgress(e: Enemy) {e.stuckTime=0;e.progressX=e.x;e.progressZ=e.z;}
-function clearPath(e: Enemy) {e.path=[];e.repathTime=0;}
+function clearPath(e: Enemy) {if(e.path.length)e.path=[];e.repathTime=0;}
 function forgetTarget(e: Enemy) {e.aggro=false;e.lostSightTime=0;e.farTime=0;e.pursuitBlocked=false;e.pursuitProbeTime=0;}
 function followPath(e: Enemy,target: Point,speed: number,dt: number,space: NavigationSpace,mode: 'chase' | 'watch' | 'return' = 'chase') {
   // Keep open-ground steering responsive; A* is only needed when the direct
@@ -106,12 +106,14 @@ function followPath(e: Enemy,target: Point,speed: number,dt: number,space: Navig
     e.repathTime=e.kind==='boss'?.18:.75;
   }
   e.mode=mode;
-  while(e.path.length&&distance(e,e.path[0])<.09) {
+  let reached=0;
+  while(reached<e.path.length&&distance(e,e.path[reached])<.09) {
     // A nearby corner can still be essential for a wide body to clear a pillar.
     // Reach it exactly unless cutting directly to the next segment is safe.
-    if(e.path.length>1&&distance(e,e.path[0])>1e-6&&!isPathClear(e,e.path[1],e.radius,space))break;
-    e.path.shift();
+    if(e.path.length>reached+1&&distance(e,e.path[reached])>1e-6&&!isPathClear(e,e.path[reached+1],e.radius,space))break;
+    reached++;
   }
+  if(reached)e.path=e.path.slice(reached);
   const next=e.path[0];
   if(!next){e.vx=0;e.vz=0;return;}
   // Knockback or another creature can push a pursuer off its old corridor.
@@ -231,11 +233,17 @@ function attackTargets(s: GameData) {
     burst(s,{x:(e.x+p.x)/2,z:(e.z+p.z)/2},'spark','#fff4c1',7);sound(s,'hit');s.shake=Math.max(s.shake,.07);
     if(e.hp<=0)defeatEnemy(s,e);
   }
-  for(const b of s.breakables) {
+  let broken: Breakable[] | undefined;
+  for(let i=0;i<s.breakables.length;i++) {
+    const b=s.breakables[i];
     if(b.zone!==s.zone||b.broken||b.lastAttackId===p.attackId||!swingHits(s,b,.3))continue;
-    b.lastAttackId=p.attackId;b.broken=true;sound(s,'break');burst(s,b,'debris',b.kind==='grass'?'#76b747':'#d28c5b',b.kind==='grass'?8:11);
+    // Scenery is unchanged on most ticks. Copy only a destroyed object and the
+    // containing list, leaving previous snapshots safe for store subscribers.
+    (broken??=s.breakables.slice())[i]={...b,lastAttackId:p.attackId,broken:true};
+    sound(s,'break');burst(s,b,'debris',b.kind==='grass'?'#76b747':'#d28c5b',b.kind==='grass'?8:11);
     const roll=random(s);if(b.kind==='pot'||roll<.54)drop(s,b,p.hp<5&&roll<.34?'heart':'rupee',p.hp<5&&roll<.34?2:1);
   }
+  if(broken)s.breakables=broken;
 }
 function transition(s: GameData,zone: Zone,point: Point) {
   s.zone=zone;Object.assign(s.player,point,{vx:0,vz:0,knockX:0,knockZ:0,invulnerable:1.4,attackTime:0});s.particles=[];s.projectiles=[];s.shake=0;s.damageFlash=0;
@@ -270,7 +278,10 @@ export function stepGame(previous: GameData,dt: number,input: InputState): GameD
   // GameCanvas owns the fixed-step accumulator. This cap also makes accidental
   // tab-resume deltas harmless when the simulation is used by another host.
   dt=Math.min(.05,Math.max(0,dt));if(dt===0)return previous;
-  const s: GameData={...previous,player:{...previous.player},enemies:previous.enemies.map(e=>({...e,path:[...e.path]})),breakables:previous.breakables.map(b=>({...b})),pickups:previous.pickups.map(p=>({...p})),particles:previous.particles.map(p=>({...p})),projectiles:previous.projectiles.map(shot=>({...shot})),sounds:[...previous.sounds],visited:[...previous.visited]};
+  // Moving entities are mutable within a tick. Routes, scenery, sound history
+  // and visited areas use copy-on-write at their mutation sites instead of
+  // allocating their unchanged contents sixty times per second.
+  const s: GameData={...previous,player:{...previous.player},enemies:previous.enemies.map(e=>({...e})),pickups:previous.pickups.map(p=>({...p})),particles:previous.particles.map(p=>({...p})),projectiles:previous.projectiles.map(shot=>({...shot}))};
   const p=s.player,obs=blockedObstacles(s);s.elapsed+=dt;s.shake=Math.max(0,s.shake-dt);s.damageFlash=Math.max(0,s.damageFlash-dt);s.messageTime=Math.max(0,s.messageTime-dt);
   p.invulnerable=Math.max(0,p.invulnerable-dt);p.attackTime=Math.max(0,p.attackTime-dt);p.attackCooldown=Math.max(0,p.attackCooldown-dt);
   const inputLength=Math.hypot(input.x,input.z),ix=inputLength>1?input.x/inputLength:input.x,iz=inputLength>1?input.z/inputLength:input.z;
@@ -380,6 +391,6 @@ export function stepGame(previous: GameData,dt: number,input: InputState): GameD
   for(const part of s.particles){part.life-=dt;part.x+=part.vx*dt;part.z+=part.vz*dt;part.y=Math.max(.02,part.y+part.vy*dt);part.vy-=9*dt;}
   s.particles=s.particles.filter(part=>part.life>0);
   if(s.phase==='playing')quest(s,input);
-  s.area=areaName(s.zone,p);if(!s.visited.includes(s.area))s.visited.push(s.area);
+  s.area=areaName(s.zone,p);if(!s.visited.includes(s.area))s.visited=[...s.visited,s.area];
   return s;
 }

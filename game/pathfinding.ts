@@ -15,11 +15,11 @@ const CLEARANCE = .02;
 const EPSILON = .000001;
 const distance = (a: Point, b: Point) => Math.hypot(a.x - b.x, a.z - b.z);
 
-function segmentPointDistanceSquared(start: Point, end: Point, point: Point) {
+function segmentPointDistanceSquared(start: Point, end: Point, x: number, z: number) {
   const dx = end.x - start.x, dz = end.z - start.z;
   const lengthSquared = dx * dx + dz * dz;
-  const t = lengthSquared === 0 ? 0 : Math.max(0, Math.min(1, ((point.x - start.x) * dx + (point.z - start.z) * dz) / lengthSquared));
-  return (start.x + dx * t - point.x) ** 2 + (start.z + dz * t - point.z) ** 2;
+  const t = lengthSquared === 0 ? 0 : Math.max(0, Math.min(1, ((x - start.x) * dx + (z - start.z) * dz) / lengthSquared));
+  return (start.x + dx * t - x) ** 2 + (start.z + dz * t - z) ** 2;
 }
 
 function pointBoxDistanceSquared(point: Point, minX: number, maxX: number, minZ: number, maxZ: number) {
@@ -30,18 +30,24 @@ function pointBoxDistanceSquared(point: Point, minX: number, maxX: number, minZ:
 
 function intersectsBox(start: Point, end: Point, minX: number, maxX: number, minZ: number, maxZ: number) {
   let entry = 0, exit = 1;
-  for (const [origin, delta, min, max] of [
-    [start.x, end.x - start.x, minX, maxX],
-    [start.z, end.z - start.z, minZ, maxZ],
-  ]) {
-    if (Math.abs(delta) < 1e-12) {
-      if (origin < min || origin > max) return false;
-    } else {
-      const first = (min - origin) / delta, last = (max - origin) / delta;
-      entry = Math.max(entry, Math.min(first, last));
-      exit = Math.min(exit, Math.max(first, last));
-      if (entry > exit) return false;
-    }
+  const dx = end.x - start.x, dz = end.z - start.z;
+  // This slab check runs for every nearby obstacle during route searches.
+  // Scalar axes avoid allocating nested arrays in the collision hot path.
+  if (Math.abs(dx) < 1e-12) {
+    if (start.x < minX || start.x > maxX) return false;
+  } else {
+    const first = (minX - start.x) / dx, last = (maxX - start.x) / dx;
+    entry = Math.max(entry, Math.min(first, last));
+    exit = Math.min(exit, Math.max(first, last));
+    if (entry > exit) return false;
+  }
+  if (Math.abs(dz) < 1e-12) {
+    if (start.z < minZ || start.z > maxZ) return false;
+  } else {
+    const first = (minZ - start.z) / dz, last = (maxZ - start.z) / dz;
+    entry = Math.max(entry, Math.min(first, last));
+    exit = Math.min(exit, Math.max(first, last));
+    if (entry > exit) return false;
   }
   return true;
 }
@@ -53,26 +59,26 @@ export function isPathClear(start: Point, end: Point, radius: number, space: Nav
   const maxX = Math.min(space.width - radius - .05, space.bounds?.maxX ?? Infinity);
   const minZ = Math.max(radius + .05, space.bounds?.minZ ?? -Infinity);
   const maxZ = Math.min(space.height - radius - .05, space.bounds?.maxZ ?? Infinity);
-  for (const point of [start, end]) {
-    if (point.x < minX - EPSILON || point.x > maxX + EPSILON || point.z < minZ - EPSILON || point.z > maxZ + EPSILON) return false;
-  }
+  const leftmost = Math.min(start.x, end.x), rightmost = Math.max(start.x, end.x);
+  const bottommost = Math.min(start.z, end.z), topmost = Math.max(start.z, end.z);
+  if (leftmost < minX - EPSILON || rightmost > maxX + EPSILON || bottommost < minZ - EPSILON || topmost > maxZ + EPSILON) return false;
   for (const exclusion of space.exclusions ?? []) {
-    if (segmentPointDistanceSquared(start, end, exclusion) < (radius + exclusion.radius) ** 2 - EPSILON) return false;
+    if (segmentPointDistanceSquared(start, end, exclusion.x, exclusion.z) < (radius + exclusion.radius) ** 2 - EPSILON) return false;
   }
   const threshold = Math.max(0, radius * radius - EPSILON);
   for (const obstacle of space.obstacles) {
     const left = obstacle.x - obstacle.w / 2, right = obstacle.x + obstacle.w / 2;
     const bottom = obstacle.z - obstacle.d / 2, top = obstacle.z + obstacle.d / 2;
     // Most world objects cannot touch this segment, even after radius inflation.
-    if (Math.max(start.x, end.x) < left - radius || Math.min(start.x, end.x) > right + radius ||
-        Math.max(start.z, end.z) < bottom - radius || Math.min(start.z, end.z) > top + radius) continue;
+    if (rightmost < left - radius || leftmost > right + radius ||
+        topmost < bottom - radius || bottommost > top + radius) continue;
     if (intersectsBox(start, end, left, right, bottom, top)) return false;
     if (pointBoxDistanceSquared(start, left, right, bottom, top) < threshold ||
         pointBoxDistanceSquared(end, left, right, bottom, top) < threshold ||
-        segmentPointDistanceSquared(start, end, { x: left, z: bottom }) < threshold ||
-        segmentPointDistanceSquared(start, end, { x: left, z: top }) < threshold ||
-        segmentPointDistanceSquared(start, end, { x: right, z: bottom }) < threshold ||
-        segmentPointDistanceSquared(start, end, { x: right, z: top }) < threshold) return false;
+        segmentPointDistanceSquared(start, end, left, bottom) < threshold ||
+        segmentPointDistanceSquared(start, end, left, top) < threshold ||
+        segmentPointDistanceSquared(start, end, right, bottom) < threshold ||
+        segmentPointDistanceSquared(start, end, right, top) < threshold) return false;
   }
   return true;
 }

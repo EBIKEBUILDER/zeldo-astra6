@@ -37,7 +37,7 @@ On phones and tablets, drag the left joystick to move; a small tilt walks slowly
 
 Use **Fullscreen** in the header to give the game the whole screen. The exit button stays beside Pause. On browsers without native fullscreen support, this still hides the site header and footer.
 
-The field HUD shows your hearts, rupees, current quest, and a live minimap with facing and objective markers. Tap the minimap to open a larger field map; tap **Satchel** to inspect your sword and quest items. Both menus pause the game and return you to the same adventure. Tap the quest card to see its milestones. Portrait and landscape layouts keep thumb controls clear of the central playfield.
+The field HUD shows your hearts, rupees, current quest, a live minimap with facing and objective markers, and an FPS counter beneath Pause. FPS measures rendered frames over a half-second window, including slow frames; the counter updates twice per second. Tap the minimap to open a larger field map; tap **Satchel** to inspect your sword and quest items. Both menus pause the game and return you to the same adventure. Tap the quest card to see its milestones. Portrait and landscape layouts keep thumb controls clear of the central playfield.
 
 ## The adventure
 
@@ -60,7 +60,9 @@ Cut grass and break pots for rupees and healing hearts. Ordinary monsters return
 - `game/pathfinding.ts` finds routes with eight-way A* and a corner-based fallback for narrow gaps.
 - `game/pursuit-memory.ts` retains aggression while monsters navigate and handles stalled pursuit recovery.
 - `game/store.ts` exposes that data and game actions through Zustand.
-- `game/renderer.ts` builds the Babylon scene and reads game data to update its meshes, camera, lighting, and effects. It does not advance gameplay.
+- `game/renderer.ts` builds the Babylon scene and reads game data to update its meshes, camera, lighting, and effects. It does not advance gameplay. Static geometry and rigid props are batched, river shimmer uses one vertex-alpha mesh, and combat particles reuse a bounded mesh pool.
+- `game/render-batching.ts` combines opaque palette geometry while preserving lighting, normals, and shadow eligibility. Transparent hero pieces and animated joints remain separate.
+- `game/frame-stats.ts` samples actual frame cadence and draw-call counts without rerendering the React HUD every frame.
 - `game/input.ts` combines keyboard, mouse, and analog touch input with a radial deadzone and normalized diagonals; short action taps survive between simulation ticks.
 - `game/camera.ts` keeps the hero in view on narrow screens and frames short landscape playfields.
 - `components/TouchControls.tsx` owns separate movement/attack pointers for two-thumb play.
@@ -71,3 +73,27 @@ Cut grass and break pots for rupees and healing hearts. Ordinary monsters return
 - `game/simulation.test.ts` checks core game rules and the quest route without a renderer.
 
 World coordinates use **+x for right** and **+z for north**. Collision is calculated in the horizontal world plane, independently of the angled camera. A seeded simulation keeps drops and enemy behavior reproducible for the same input sequence. Progress lives in memory for the current session; refreshing starts a new adventure.
+
+## Performance verification
+
+The original resolution, antialiasing, 2048px blurred shadow map, lighting, geometry, and effects are retained. The renderer freezes only static transforms, updates breakable visibility only when its data or zone changes, and skips rendering in hidden tabs. Simulation collections use copy-on-write so unchanged scenery and routes do not allocate on every tick.
+
+`scripts/render-benchmark.cjs` renders deterministic village, river, dungeon, and particle-heavy combat scenes. It counts actual WebGL draws (including shadow and postprocessing passes), measures CPU submission time, tracks buffer allocation, and saves matching screenshots. Headless SwiftShader timings are comparative measurements, not hardware FPS predictions. The optional browser scripts require Playwright and pngjs in addition to the project's esbuild; set `BENCHMARK_NODE_MODULES` if those are installed outside this project's dependencies, and `CHROME_BIN` to select Chromium.
+
+```sh
+node scripts/render-benchmark.cjs --source /path/to/baseline/game --output test-artifacts/render-baseline
+node scripts/render-benchmark.cjs --compare test-artifacts/render-baseline --output test-artifacts/render-current
+# With the game running locally, check FPS, pause/resume and six responsive layouts:
+node scripts/fps-ui-smoke.cjs http://127.0.0.1:3000
+```
+
+At 1280×720, the deterministic comparison measured these draw calls per frame, including shadows:
+
+| Scene | Before | After | Reduction |
+| --- | ---: | ---: | ---: |
+| Village | 378 | 113 | 70% |
+| River | 567 | 146 | 74% |
+| Dungeon | 287 | 128 | 55% |
+| Combat with 96 particles | 392 | 248 | 37% |
+
+After warmup, replacing all 96 combat particles creates no additional geometry buffers. Matching screenshots retain the scene palette and detail; mean absolute pixel-channel differences were below 0.1 on the 0–255 scale in these four views. Exact FPS depends on the device, viewport, browser, and current gameplay.
