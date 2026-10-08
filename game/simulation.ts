@@ -93,13 +93,13 @@ function navigationSpace(s: GameData,e: Enemy,obstacles: Obstacle[]): Navigation
   };
 }
 function resetProgress(e: Enemy) {e.stuckTime=0;e.progressX=e.x;e.progressZ=e.z;}
-function clearPath(e: Enemy) {e.path=[];e.repathTime=0;resetProgress(e);}
+function clearPath(e: Enemy) {e.path=[];e.repathTime=0;}
 function pursue(e: Enemy,target: Point,speed: number,dt: number,space: NavigationSpace) {
   // Keep open-ground steering responsive; A* is only needed when the direct
   // corridor is obstructed. The Guardian refreshes its route four times faster.
   if(isPathClear(e,target,e.radius,space))e.path=[{x:target.x,z:target.z}];
   else if(e.mode!=='chase'||e.repathTime<=0) {
-    e.path=findPath(e,target,e.radius,space);
+    e.path=findPath(e,target,e.radius,space,PLAYER_RADIUS);
     e.repathTime=e.kind==='boss'?.18:.75;
   }
   e.mode='chase';
@@ -118,10 +118,11 @@ function pursue(e: Enemy,target: Point,speed: number,dt: number,space: Navigatio
   e.vx=(next.x-e.x)/d*travel;e.vz=(next.z-e.z)/d*travel;
 }
 function rangedFallback(s: GameData,e: Enemy,dt: number) {
-  const pursuing=e.mode==='chase'&&e.hitstun<=0&&e.hp>0&&s.gateOpen&&s.player.z>=15.1;
+  const pursuing=(e.mode==='chase'||e.mode==='charge')&&e.hitstun<=0&&e.hp>0&&s.gateOpen&&s.player.z>=15.1;
   if(!pursuing||distance(e,s.player)<=e.radius+PLAYER_RADIUS+.12){resetProgress(e);return;}
   // Measure actual displacement after wall and body separation, not desired
-  // velocity. Windups, recovery, hitstun, and melee contact are deliberate stops.
+  // velocity. A charge pinned against scenery counts too; windups, recovery,
+  // hitstun, and melee contact are deliberate stops and reset the timer above.
   if(distance(e,{x:e.progressX,z:e.progressZ})>=.16){resetProgress(e);return;}
   e.stuckTime+=dt;
   if(e.stuckTime+1e-8<.5||e.rangedCooldown>0)return;
@@ -186,7 +187,7 @@ function attackTargets(s: GameData) {
 }
 function transition(s: GameData,zone: Zone,point: Point) {
   s.zone=zone;Object.assign(s.player,point,{vx:0,vz:0,knockX:0,knockZ:0,invulnerable:1.4,attackTime:0});s.particles=[];s.projectiles=[];s.shake=0;s.damageFlash=0;
-  for(const e of s.enemies) {clearPath(e);if(e.zone===zone)e.contactCooldown=Math.max(e.contactCooldown,1.1);}
+  for(const e of s.enemies) {clearPath(e);resetProgress(e);if(e.zone===zone)e.contactCooldown=Math.max(e.contactCooldown,1.1);}
   sound(s,'enter');message(s,zone==='dungeon'?'A little courage. A little light. Find the old brass key.':'Fresh air. The pines welcome you home.',4.5);
 }
 function quest(s: GameData,input: InputState) {
@@ -227,7 +228,7 @@ export function stepGame(previous: GameData,dt: number,input: InputState): GameD
     if(e.hp<=0) {
       if(e.kind==='boss')continue;
       e.respawn=Math.max(0,e.respawn-dt);
-      if(e.respawn===0&&(e.zone!==s.zone||distance(p,{x:e.spawnX,z:e.spawnZ})>3.5)){Object.assign(e,{x:e.spawnX,z:e.spawnZ,hp:e.maxHp,vx:0,vz:0,hitstun:0,flash:0,contactCooldown:1,lastAttackId:-1,mode:'idle',rangedCooldown:0});clearPath(e);}
+      if(e.respawn===0&&(e.zone!==s.zone||distance(p,{x:e.spawnX,z:e.spawnZ})>3.5)){Object.assign(e,{x:e.spawnX,z:e.spawnZ,hp:e.maxHp,vx:0,vz:0,hitstun:0,flash:0,contactCooldown:1,lastAttackId:-1,mode:'idle',rangedCooldown:0});clearPath(e);resetProgress(e);}
       continue;
     }
     if(e.zone!==s.zone)continue;
@@ -254,7 +255,9 @@ export function stepGame(previous: GameData,dt: number,input: InputState): GameD
         else if(e.mode==='idle'&&e.modeTime>0){e.vx*=Math.exp(-9*dt);e.vz*=Math.exp(-9*dt);}
         else if(d<5.6&&isPathClear(e,p,e.radius,navigation)){e.mode='windup';e.modeTime=.65;e.vx=0;e.vz=0;}
         else pursue(e,p,2.65,dt,navigation);
-      } else if(!inSanctuary&&d<5.7) pursue(e,p,1.95,dt,navigation);
+      // Going around a hedge can briefly increase distance to the hero. Keep
+      // an acquired target through that detour instead of turning back home.
+      } else if(!inSanctuary&&d<(e.mode==='chase'?9:5.7)) pursue(e,p,1.95,dt,navigation);
       else {
         e.mode='idle';if(e.modeTime<=0){e.wanderAngle=random(s)*TAU;e.modeTime=1.2+random(s)*2;}
         if(distance(e,{x:e.spawnX,z:e.spawnZ})>2.1)e.wanderAngle=Math.atan2(e.spawnZ-e.z,e.spawnX-e.x);

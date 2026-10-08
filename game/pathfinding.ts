@@ -110,10 +110,78 @@ class MinHeap {
   }
 }
 
-/** Deterministic eight-way A*. Returned waypoints exclude the start. When the
- * exact goal cannot be occupied, approach the nearest reachable grid position.
- * All search caches are local, so gates and broken pots take effect immediately. */
-export function findPath(start: Point, goal: Point, radius: number, space: NavigationSpace): Point[] {
+/** A coarse grid can miss a perfectly usable gap between two pieces of scenery.
+ * Only incomplete grid routes need this small, geometry-aligned visibility
+ * graph; its size depends on the scenery, not a much denser world-sized grid. */
+function completeAroundCorners(start: Point, goal: Point, radius: number, space: NavigationSpace, gridRoute: Point[], goalRadius: number): Point[] {
+  const goalClear = isPathClear(goal, goal, radius, space);
+  // A player can stand closer to a wall than a larger monster. In that case a
+  // reachable contact position is sufficient; never aim into the wall itself.
+  const contactRange = goalRadius > 0 ? Math.max(0, radius + goalRadius - .08) : 0;
+  const points: Point[] = [start];
+  const add = (point: Point) => { if (isPathClear(point, point, radius, space)) points.push({ x: point.x, z: point.z }); };
+  if (goalClear) add(goal);
+  else if (contactRange > 0) {
+    for (let i = 0; i < 24; i++) {
+      const angle = i * Math.PI / 12;
+      add({ x: goal.x + Math.cos(angle) * contactRange, z: goal.z + Math.sin(angle) * contactRange });
+    }
+  }
+  for (const point of gridRoute) add(point);
+  const buffer = radius + CLEARANCE;
+  for (const obstacle of space.obstacles) {
+    for (const x of [obstacle.x - obstacle.w / 2 - buffer, obstacle.x + obstacle.w / 2 + buffer]) {
+      for (const z of [obstacle.z - obstacle.d / 2 - buffer, obstacle.z + obstacle.d / 2 + buffer]) add({ x, z });
+    }
+  }
+  for (const exclusion of space.exclusions ?? []) {
+    // The circumscribed ring's chords stay outside the sanctuary as well.
+    const ringRadius = (exclusion.radius + buffer) / Math.cos(Math.PI / 32);
+    for (let i = 0; i < 32; i++) {
+      const angle = i * Math.PI / 16;
+      add({ x: exclusion.x + Math.cos(angle) * ringRadius, z: exclusion.z + Math.sin(angle) * ringRadius });
+    }
+  }
+  const costs = new Float64Array(points.length).fill(Infinity);
+  const parents = new Int32Array(points.length).fill(-1), closed = new Uint8Array(points.length);
+  const heuristic = (point: Point) => Math.max(0, distance(point, goal) - (goalClear ? 0 : contactRange));
+  const open = new MinHeap();
+  costs[0] = 0;
+  open.push({ id: 0, cost: 0, score: heuristic(start) });
+  let closest = 0, reachedGoal = false;
+  while (open.length > 0) {
+    const current = open.pop();
+    if (closed[current.id] || current.cost > costs[current.id]) continue;
+    closed[current.id] = 1;
+    const point = points[current.id], toGoal = distance(point, goal);
+    if (toGoal < distance(points[closest], goal) - EPSILON) closest = current.id;
+    if (toGoal <= (goalClear ? EPSILON : contactRange + EPSILON)) {
+      closest = current.id;
+      reachedGoal = true;
+      break;
+    }
+    for (let id = 1; id < points.length; id++) {
+      if (closed[id]) continue;
+      const next = points[id], cost = current.cost + distance(point, next);
+      if (cost >= costs[id] || !isPathClear(point, next, radius, space)) continue;
+      costs[id] = cost;
+      parents[id] = current.id;
+      open.push({ id, cost, score: cost + heuristic(next) });
+    }
+  }
+  // Retain the grid's useful closest approach if the graph also cannot reach
+  // the destination; never replace it with a worse partial route.
+  if (!reachedGoal && gridRoute.length > 0 && distance(points[closest], goal) >= distance(gridRoute[gridRoute.length - 1], goal) - EPSILON) return gridRoute;
+  const route: Point[] = [];
+  for (let at = closest; at > 0; at = parents[at]) route.push(points[at]);
+  return route.reverse();
+}
+
+/** Deterministic eight-way A* with a geometry-aligned fallback for narrow gaps.
+ * Waypoints exclude the start. An optional target radius allows contact-range
+ * approaches when the exact goal cannot fit the moving body. All search caches
+ * are local, so gates and broken pots take effect immediately. */
+export function findPath(start: Point, goal: Point, radius: number, space: NavigationSpace, goalRadius = 0): Point[] {
   if (distance(start, goal) < EPSILON) return [];
   if (isPathClear(start, goal, radius, space)) return [{ x: goal.x, z: goal.z }];
 
@@ -174,7 +242,7 @@ export function findPath(start: Point, goal: Point, radius: number, space: Navig
       open.push({ id: next, cost, score: cost + distance(nextPoint, goal) });
     }
   }
-  if (closest === -1) return [];
+  if (closest === -1) return completeAroundCorners(start, goal, radius, space, [], goalRadius);
   const route: Point[] = [];
   for (let at = closest; at !== -1; at = parents[at]) route.push(pointAt(at));
   route.reverse();
@@ -194,5 +262,5 @@ export function findPath(start: Point, goal: Point, radius: number, space: Navig
     anchor = route[next];
     index = next + 1;
   }
-  return smoothed;
+  return reachedGoal ? smoothed : completeAroundCorners(start, goal, radius, space, smoothed, goalRadius);
 }

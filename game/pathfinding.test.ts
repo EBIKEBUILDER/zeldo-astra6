@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { findPath, isPathClear, type NavigationSpace } from './pathfinding';
 import type { Obstacle, Point } from './types';
+import { SANCTUARY, WORLDS } from './world';
 
 const wall = (id: string, x: number, z: number, w: number, d: number): Obstacle => ({ id, kind: 'wall', x, z, w, d });
 const space = (obstacles: Obstacle[] = []): NavigationSpace => ({ width: 14, height: 12, obstacles });
@@ -109,4 +110,30 @@ test('paths route around the circular spawn sanctuary with body clearance', () =
   const inside = findPath(start, { x: 7, z: 6 }, .43, world);
   assert.ok(Math.hypot(last(inside).x - 7, last(inside).z - 6) >= 2.43);
   assertClearRoute(start, inside, .43, world);
+});
+
+const overworld: NavigationSpace = { ...WORLDS.overworld, exclusions: [SANCTUARY] };
+for (const { name, start, goal } of [
+  { name: 'the northern meadow rock', start: { x: 18.5, z: 1.5578811115363413 }, goal: { x: 18.5, z: 4.442118888463659 } },
+  { name: 'the eastern rock beside the pine border', start: { x: 46.494, z: 20.5 }, goal: { x: 43.306, z: 20.5 } },
+  { name: 'the narrow gap in the Elder Stones', start: { x: 37.5, z: 25.38875 }, goal: { x: 38.5, z: 23.21125 } },
+]) {
+  test(`monsters can navigate around ${name} when grid cells miss the gap`, () => {
+    assert.ok(isPathClear(start, start, .43, overworld));
+    assert.ok(isPathClear(goal, goal, .43, overworld));
+    const route = findPath(start, goal, .43, overworld);
+    assert.deepEqual(last(route), goal, 'A reachable destination must not become a partial route or a permanent stop');
+    assertClearRoute(start, route, .43, overworld);
+    assert.deepEqual(findPath(start, goal, .43, overworld), route);
+  });
+}
+
+test('a monster reaches melee distance when the player hugs a rock too closely for its body', () => {
+  const start = { x: 15.158444392029196, z: 5.245217344723642 };
+  const goal = { x: 18.537218416496966, z: 2.0335287720923563 };
+  assert.ok(isPathClear(goal, goal, .34, overworld), 'The player fits beside the rock');
+  assert.equal(isPathClear(goal, goal, .43, overworld), false, 'The monster cannot occupy the exact player center');
+  const route = findPath(start, goal, .43, overworld, .34);
+  assert.ok(Math.hypot(last(route).x - goal.x, last(route).z - goal.z) < .43 + .34);
+  assertClearRoute(start, route, .43, overworld);
 });
