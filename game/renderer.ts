@@ -391,7 +391,23 @@ export function createGameRenderer(canvas: HTMLCanvasElement) {
   const enemyNodes = new Map<string, { node: B.TransformNode; body: B.Mesh; eyes: B.Mesh[]; danger: B.Mesh | null; originals: Map<B.AbstractMesh, B.Material | null> }>();
   const breakableNodes = new Map<string, B.TransformNode>();
   const pickupNodes = new Map<string, B.TransformNode>();
+  const projectileNodes = new Map<number, { node: B.TransformNode; core: B.Mesh; halo: B.Mesh; tails: B.Mesh[] }>();
   const particleNodes = new Map<number, B.Mesh>();
+  function projectileNode(id: number) {
+    const node = group('guardian-wisp');
+    const core = finish(B.MeshBuilder.CreatePolyhedron(`wisp-core-${serial++}`, { type: 1, size: .18 }, scene), '#ccf4ff', node, false, .95);
+    const halo = ring('wisp-halo', .27, .045, 0, 0, 0, '#aa89ed', node);
+    halo.rotation.x = Math.PI / 2; halo.material = mat('#aa89ed', .8, .8);
+    const tails = [0, 1, 2].map(i => {
+      const tail = finish(B.MeshBuilder.CreatePolyhedron(`wisp-tail-${serial++}`, { type: 1, size: .105 - i * .02 }, scene), '#8ec6ff', node, false, .7);
+      tail.position.z = -.30 - i * .19; tail.scaling.z = 1.55;
+      tail.visibility = .66 - i * .18;
+      return tail;
+    });
+    const model = { node, core, halo, tails };
+    projectileNodes.set(id, model);
+    return model;
+  }
   function enemyNode(id: string, boss: boolean) {
     const node = group(boss ? 'ember-guardian' : 'moss-slime');
     const body = ball('slime-body', boss ? 2.28 : 1.05, 0, boss ? .78 : .43, 0, boss ? '#ac704e' : '#889552', node, [1, .73, 1]);
@@ -530,6 +546,24 @@ export function createGameRenderer(canvas: HTMLCanvasElement) {
       node.setEnabled(item.zone === activeZone);
       node.position.set(item.x, .65 + Math.sin(time * 4 + item.age) * .12, item.z);
       node.rotation.y = item.kind === 'rupee' ? time * 2.1 : Math.sin(time * 2) * .35;
+    }
+    // Only project the simulation's live shots; removed or off-zone shots release
+    // their geometry immediately, including when the adventure is restarted.
+    const visibleProjectiles = state.projectiles.filter(item => item.zone === activeZone);
+    const projectileIds = new Set(visibleProjectiles.map(item => item.id));
+    projectileNodes.forEach((model, id) => { if (!projectileIds.has(id)) { model.node.dispose(); projectileNodes.delete(id); } });
+    for (const item of visibleProjectiles) {
+      const model = projectileNodes.get(item.id) ?? projectileNode(item.id);
+      model.node.position.set(item.x, .72, item.z);
+      model.node.rotation.y = Math.atan2(item.vx, item.vz);
+      model.node.scaling.setAll(item.radius / .18);
+      model.core.rotation.set(item.age * 7, item.age * 5, item.age * 3);
+      model.halo.scaling.setAll(1 + Math.sin(item.age * 18) * .09);
+      model.tails.forEach((tail, i) => {
+        tail.position.x = Math.sin(item.age * 16 - i * .9) * .045;
+        tail.rotation.z = item.age * 5 + i;
+        tail.scaling.z = 1.55 * Math.min(1, item.age / .12);
+      });
     }
     const particleIds = new Set(state.particles.map(item => item.id));
     particleNodes.forEach((mesh, id) => { if (!particleIds.has(id)) { mesh.dispose(); particleNodes.delete(id); } });
