@@ -90,7 +90,7 @@ test('a blob takes the long river crossing even when its detour exceeds the old 
   assert.ok(reachedHero, 'Finish the entire detour and reach the hero on the other bank');
 });
 
-test('spawn safety cancels a retained overworld chase immediately', () => {
+test('spawn safety protects the hero while an alerted monster remembers a brief retreat', () => {
   let state = encounter({ x: 14.6, z: 6 }, { x: 12.8, z: 6 });
   state = stepGame(state, FIXED_DT, idle);
   assert.equal(state.enemies[0].mode, 'chase');
@@ -98,8 +98,8 @@ test('spawn safety cancels a retained overworld chase immediately', () => {
   for (let frame = 0; frame < 180; frame++) {
     state = stepGame(state, FIXED_DT, idle);
     const enemy = state.enemies[0];
-    assert.equal(enemy.aggro, false, 'The sanctuary still ends aggression immediately');
-    assert.notEqual(enemy.mode, 'chase');
+    assert.equal(enemy.aggro, true, 'A short sanctuary visit must not erase the acquired target');
+    assert.equal(enemy.mode, 'watch');
     assert.ok(distance(enemy, SANCTUARY) >= SANCTUARY.radius + enemy.radius - .001);
   }
   assert.equal(state.player.hp, state.player.maxHp);
@@ -113,6 +113,8 @@ test('a disengaged blob turns and walks home around a hedge instead of sliding b
   // The chase has carried the monster to the other side of the orchard hedge.
   Object.assign(state.enemies[0], { x: 33, z: 12.5, facingX: -1, facingZ: 0 });
   Object.assign(state.player, { x: SANCTUARY.x, z: SANCTUARY.z });
+  // Isolate the return movement after the new concealment grace period ends.
+  state.enemies[0].lostSightTime = 18;
   let detour = 0, backwardFrames = 0, returnedHome = false;
   for (let frame = 0; frame < 2400; frame++) {
     state = stepGame(state, FIXED_DT, idle);
@@ -165,12 +167,15 @@ test('entering and leaving the dungeon clears old pursuit rather than carrying i
   let state = encounter({ x: 33, z: 13 }, { x: 35, z: 13 });
   state = stepGame(state, FIXED_DT, idle);
   assert.equal(state.enemies[0].aggro, true);
+  Object.assign(state.enemies[0], { lostSightTime: 5, farTime: 1 });
   Object.assign(state.player, WORLDS.overworld.entrance);
   state = stepGame(state, FIXED_DT, { ...idle, interact: true });
   assert.equal(state.zone, 'dungeon');
   assert.equal(state.enemies[0].aggro, false);
   assert.notEqual(state.enemies[0].mode, 'chase');
   assert.equal(state.enemies[0].path.length, 0);
+  assert.equal(state.enemies[0].lostSightTime, 0);
+  assert.equal(state.enemies[0].farTime, 0);
 
   Object.assign(state.player, WORLDS.dungeon.exit, { invulnerable: 0 });
   state = stepGame(state, FIXED_DT, { ...idle, interact: true });
@@ -186,12 +191,14 @@ test('a defeated pursuer respawns without retaining its former target', () => {
   let state = encounter({ x: 33, z: 13 }, { x: 35, z: 13 });
   state = stepGame(state, FIXED_DT, idle);
   assert.equal(state.enemies[0].aggro, true);
-  Object.assign(state.enemies[0], { hp: 0, respawn: FIXED_DT });
+  Object.assign(state.enemies[0], { hp: 0, respawn: FIXED_DT, lostSightTime: 5, farTime: 1 });
   Object.assign(state.player, { x: 44, z: 13 });
   state = stepGame(state, FIXED_DT, idle);
   assert.equal(state.enemies[0].hp, state.enemies[0].maxHp);
   assert.equal(state.enemies[0].aggro, false);
   assert.equal(state.enemies[0].path.length, 0);
+  assert.equal(state.enemies[0].lostSightTime, 0);
+  assert.equal(state.enemies[0].farTime, 0);
   for (let frame = 0; frame < 120; frame++) {
     state = stepGame(state, FIXED_DT, idle);
     assert.equal(state.enemies[0].aggro, false, 'Respawned enemies use the original acquisition range');

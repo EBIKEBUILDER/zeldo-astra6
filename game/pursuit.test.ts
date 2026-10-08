@@ -134,7 +134,7 @@ test('new pursuit keeps the Guardian behind its gate and inside its arena', () =
   assert.equal(distance(state.enemies[0], position), 0);
 });
 
-test('returning to the spawn sanctuary ends an active pursuit without letting the monster inside', () => {
+test('briefly returning to the spawn sanctuary preserves pursuit without letting the monster inside', () => {
   let state = createInitialData();
   state.phase = 'playing';
   Object.assign(state.player, { x: 12.8, z: 6 });
@@ -146,7 +146,8 @@ test('returning to the spawn sanctuary ends an active pursuit without letting th
   for (let frame = 0; frame < 180; frame++) {
     state = stepGame(state, FIXED_DT, idle);
     const enemy = state.enemies[0];
-    assert.equal(enemy.mode, 'idle');
+    assert.equal(enemy.mode, 'watch');
+    assert.equal(enemy.aggro, true);
     assert.ok(distance(enemy, SANCTUARY) >= SANCTUARY.radius + enemy.radius - .001);
   }
   assert.equal(state.player.hp, state.player.maxHp);
