@@ -62,9 +62,9 @@ export function updatePursuitMemory(enemy: Enemy, player: Point, inSanctuary: bo
 /** Measure actual movement after walls, knockback, and body separation. A mob
  * resets only after twenty uninterrupted seconds unable to move out of melee.
  * The anchor rejects tiny collision jitter but accepts a detour in any direction. */
-export function recordPursuitProgress(enemy: Enemy, player: Point, inSanctuary: boolean, dt: number) {
+export function recordPursuitProgress(enemy: Enemy, player: Point, inSanctuary: boolean, dt: number, sameZone = true) {
   if (!enemy.aggro || enemy.mode !== 'chase' || inSanctuary || enemy.hitstun > 0 ||
-      distance(enemy, player) <= enemy.radius + PLAYER_RADIUS + .055) {
+      (sameZone && distance(enemy, player) <= enemy.radius + PLAYER_RADIUS + .055)) {
     resetProgress(enemy);
     return false;
   }

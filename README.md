@@ -57,7 +57,9 @@ Cut grass and break pots for rupees and healing hearts. Ordinary monsters return
 - `game/types.ts` defines serializable world and game data.
 - `game/world.ts` lays out the overworld, dungeon, obstacles, and decorative details.
 - `game/simulation.ts` owns movement, collision and separation, combat, enemies, pickups, particles, quest progression, and seeded randomness.
-- `game/pathfinding.ts` finds routes with eight-way A* and a corner-based fallback for narrow gaps.
+- `game/pathfinding.ts` finds routes with resumable eight-way A*, shared walkability caches, and a corner-based fallback for narrow gaps.
+- `game/navigation-network.ts` connects shared zone grids with directed, costed portal edges.
+- `game/navigation-runtime.ts` rebuilds changed navigation geometry and schedules all enemy searches within one per-tick work budget.
 - `game/pursuit-memory.ts` retains aggression while monsters navigate and handles stalled pursuit recovery.
 - `game/store.ts` exposes that data and game actions through Zustand.
 - `game/renderer.ts` builds the Babylon scene and reads game data to update its meshes, camera, lighting, and effects. It does not advance gameplay. Static geometry and rigid props are batched, river shimmer uses one vertex-alpha mesh, and combat particles reuse a bounded mesh pool.
@@ -73,6 +75,18 @@ Cut grass and break pots for rupees and healing hearts. Ordinary monsters return
 - `game/simulation.test.ts` checks core game rules and the quest route without a renderer.
 
 World coordinates use **+x for right** and **+z for north**. Collision is calculated in the horizontal world plane, independently of the angled camera. A seeded simulation keeps drops and enemy behavior reproducible for the same input sequence. Progress lives in memory for the current session; refreshing starts a new adventure.
+
+## Navigation and portals
+
+The overworld's six 16×14 chunks share one 48×28 navigation space with half-unit grid cells. Chunk seams have no collision bounds or transition logic: monsters walk across them using ordinary A* neighbors. Obstacles, the river, body clearance, and the sanctuary still determine which routes are usable.
+
+`NAVIGATION_CHUNKS` and `NAVIGATION_PORTALS` in `game/world.ts` describe disconnected connections. Each portal has an ID, `fromChunk`, `fromTile`, `toChunk`, `toTile`, `traversalCost`, and `traversableByAI`. Tile coordinates are integer indices relative to their chunk origin, multiplied by 0.5 world units. Links are directed; define a separate return link when needed. The planner includes walking distance and portal cost, using a zero heuristic for its portal graph so a cheap warp can win over walking. Route markers preserve the entrance and landing as separate steps.
+
+Both shrine links default to `traversableByAI: false`. Change either flag to `true` to allow pursuit in that direction. Alerted monsters then walk to the mouth, cross only when their body fits at the landing, and continue chasing in the destination. Offscreen followers can finish their approach and return home; defeated followers respawn in their original zone. The Guardian retains its arena leash.
+
+All enemy searches, including blocked-pursuit recovery probes and narrow-gap fallback, share `PATHFINDING_WORK_PER_TICK` in `game/navigation-runtime.ts`. Unfinished searches resume fairly on later ticks while monsters retain any still-safe route. Failed searches use a safe closest approach, stop steering into walls, and retry; the existing twenty-second stalled-pursuit timeout then sends ordinary monsters home. `getNavigationStats(state)` reports consumed work and queued searches for diagnostics.
+
+Changing solid geometry—opening the gate, breaking a pot, or editing an obstacle—invalidates cached grid cells, pending searches, and old routes before the next enemy movement update. In the standalone pathfinding API, increment `NavigationSpace.revision` or call `invalidateNavigationSpace` when changing geometry during a pending search; the game runtime handles this automatically.
 
 ## Performance verification
 

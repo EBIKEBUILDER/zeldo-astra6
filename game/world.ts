@@ -1,4 +1,5 @@
 import type { Decoration, Obstacle, Point, WorldData, Zone } from './types';
+import type { NavigationChunk, NavigationPortal } from './navigation-network';
 
 export const SANCTUARY = { x: 8, z: 6, radius: 4.2 };
 const obstacles: Obstacle[] = [];
@@ -62,6 +63,29 @@ export const WORLDS: Record<Zone, WorldData> = {
   overworld: { width:48,height:28,obstacles,decorations,spawn:{x:8,z:6},entrance:{x:42,z:24},exit:{x:42,z:22},key:{x:-100,z:-100},gate:{x:-100,z:-100},chest:{x:-100,z:-100} },
   dungeon: { width:20,height:28,obstacles:dungeonObstacles,decorations:dungeonDecorations,spawn:{x:10,z:3},entrance:{x:10,z:2},exit:{x:10,z:2},key:{x:5,z:8},gate:{x:10,z:14},chest:{x:10,z:25} },
 };
+
+// Chunks describe placement, never collision boundaries. All six overworld
+// chunks share the same world-coordinate grid, including cells on their seams.
+export const NAVIGATION_CHUNKS: NavigationChunk[] = [
+  ...Array.from({ length: 6 }, (_, index) => ({
+    id: `overworld-${index % 3}-${Math.floor(index / 3)}`,
+    zone: 'overworld' as const,
+    origin: { x: (index % 3) * 16, z: Math.floor(index / 3) * 14 },
+    width: 16, height: 14,
+  })),
+  { id: 'dungeon', zone: 'dungeon', origin: { x: 0, z: 0 }, width: 20, height: 28 },
+];
+
+// Directed links; tile indices are local half-unit navigation cells. Return
+// links are explicit so doors and warps can have different rules in each direction.
+export const NAVIGATION_PORTALS: NavigationPortal[] = [
+  { id: 'shrine-enter', fromChunk: 'overworld-2-1', fromTile: { x: 20, z: 20 },
+    toChunk: 'dungeon', toTile: { x: 20, z: 6 }, traversalCost: 1,
+    traversableByAI: false, interactionRadius: 2 },
+  { id: 'shrine-leave', fromChunk: 'dungeon', fromTile: { x: 20, z: 4 },
+    toChunk: 'overworld-2-1', toTile: { x: 20, z: 16 }, traversalCost: 1,
+    traversableByAI: false, interactionRadius: 1.7 },
+];
 
 export function areaName(zone: Zone, position: Point): string {
   if(zone==='dungeon') return position.z>14 ? 'The Ember Sanctum' : 'The Sunken Hall';

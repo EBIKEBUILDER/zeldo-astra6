@@ -4,6 +4,10 @@ export type NavigationSpace = {
   width: number;
   height: number;
   obstacles: readonly Obstacle[];
+  /** Increment when mutating navigation geometry while a search is pending. */
+  revision?: string | number;
+  /** Stable cache identity for callers that recreate otherwise identical spaces. */
+  cacheKey?: object;
   /** Optional center-coordinate limits, in addition to the world's edges. */
   bounds?: { minX?: number; maxX?: number; minZ?: number; maxZ?: number };
   /** Geometric exclusion radii; the moving body's radius is added here. */
@@ -116,38 +120,107 @@ class MinHeap {
   }
 }
 
+export type PathResult = { route: Point[]; reachedGoal: boolean; cost: number };
+export type PathSearchStep = { done: boolean; workUsed: number; invalidated?: boolean } & Partial<PathResult>;
+type GridCache = { signature: string; generation: object; walkability: Map<number, Uint8Array> };
+const gridCaches = new WeakMap<object, GridCache>();
+
+function geometrySignature(space: NavigationSpace) {
+  // Geometry, rather than obstacle IDs or array identity, determines validity.
+  // This also catches callers mutating a tile in place between searches.
+  return JSON.stringify([
+    space.width, space.height, space.revision,
+    space.bounds?.minX, space.bounds?.maxX, space.bounds?.minZ, space.bounds?.maxZ,
+    space.obstacles.map(({ x, z, w, d }) => [x, z, w, d]),
+    space.exclusions?.map(({ x, z, radius }) => [x, z, radius]),
+  ]);
+}
+
+function navigationCache(space: NavigationSpace): GridCache {
+  const key = space.cacheKey ?? space, signature = geometrySignature(space);
+  let cache = gridCaches.get(key);
+  if (!cache || cache.signature !== signature) {
+    cache = { signature, generation: {}, walkability: new Map() };
+    gridCaches.set(key, cache);
+  }
+  return cache;
+}
+
+/** Invalidates lazy grid cells and any pending searches using this identity. */
+export function invalidateNavigationSpace(space: NavigationSpace) {
+  gridCaches.delete(space.cacheKey ?? space);
+}
+
+function spaceVersion(space: NavigationSpace) {
+  return [space.revision, space.width, space.height,
+    space.bounds?.minX, space.bounds?.maxX, space.bounds?.minZ, space.bounds?.maxZ,
+    space.obstacles, space.obstacles.length, space.exclusions, space.exclusions?.length] as const;
+}
+
+export type PathSearch = {
+  /** Search-owned iterator. Use advancePathSearch to apply validity checks. */
+  readonly iterator: Generator<void, PathResult, void>;
+  readonly space: NavigationSpace;
+  readonly version: ReturnType<typeof spaceVersion>;
+  readonly generation: object;
+  result?: PathResult;
+  invalidated?: boolean;
+};
+
+/** Each yield represents one bounded candidate/edge operation. This includes
+ * graph construction, smoothing and visibility edges in the narrow-gap fallback,
+ * so a large fallback cannot escape the simulation's shared per-tick budget.
+ * One collision operation scans the supplied scenery using cheap broad-phase
+ * rejection; it never performs another path search or a graph-wide scan. */
+function* resultFor(route: Point[], reachedGoal: boolean, start: Point): Generator<void, PathResult, void> {
+  let cost = 0, previous = start;
+  for (const point of route) {
+    cost += distance(previous, point);
+    previous = point;
+    yield;
+  }
+  return { route, reachedGoal, cost };
+}
+
 /** A coarse grid can miss a perfectly usable gap between two pieces of scenery.
- * Only incomplete grid routes need this small, geometry-aligned visibility
- * graph; its size depends on the scenery, not a much denser world-sized grid. */
-function completeAroundCorners(start: Point, goal: Point, radius: number, space: NavigationSpace, gridRoute: Point[], goalRadius: number): Point[] {
+ * Only incomplete grid routes need this geometry-aligned visibility graph. */
+function* completeAroundCorners(start: Point, goal: Point, radius: number, space: NavigationSpace, gridRoute: Point[], goalRadius: number): Generator<void, PathResult, void> {
   const goalClear = isPathClear(goal, goal, radius, space);
-  // A player can stand closer to a wall than a larger monster. In that case a
-  // reachable contact position is sufficient; never aim into the wall itself.
+  yield;
+  // A player can stand closer to a wall than a larger monster. A reachable
+  // contact position is sufficient; never aim into the wall itself.
   const contactRange = goalRadius > 0 ? Math.max(0, radius + goalRadius - .08) : 0;
   const points: Point[] = [start];
-  const add = (point: Point) => { if (isPathClear(point, point, radius, space)) points.push({ x: point.x, z: point.z }); };
-  if (goalClear) add(goal);
+  function* add(point: Point): Generator<void, void, void> {
+    if (isPathClear(point, point, radius, space)) points.push({ x: point.x, z: point.z });
+    yield;
+  }
+  if (goalClear) yield* add(goal);
   else if (contactRange > 0) {
     for (let i = 0; i < 24; i++) {
       const angle = i * Math.PI / 12;
-      add({ x: goal.x + Math.cos(angle) * contactRange, z: goal.z + Math.sin(angle) * contactRange });
+      yield* add({ x: goal.x + Math.cos(angle) * contactRange, z: goal.z + Math.sin(angle) * contactRange });
     }
   }
-  for (const point of gridRoute) add(point);
+  for (const point of gridRoute) yield* add(point);
   const buffer = radius + CLEARANCE;
   for (const obstacle of space.obstacles) {
     for (const sideX of [-1, 1]) for (const sideZ of [-1, 1]) {
       const x = obstacle.x + sideX * obstacle.w / 2, z = obstacle.z + sideZ * obstacle.d / 2;
-      add({ x: x + sideX * buffer, z: z + sideZ * buffer });
+      yield* add({ x: x + sideX * buffer, z: z + sideZ * buffer });
       // The comfort margin must not seal a gap the body can physically fit.
-      // Add a tighter corner only when a neighboring wall or world boundary
-      // blocks a buffered shoulder but leaves its nominal-radius counterpart
-      // usable. Ordinary routes retain their margin and compact search graph.
       const tight = { x: x + sideX * radius, z: z + sideZ * radius };
       const bufferedShoulders = [{ x: x + sideX * buffer, z }, { x, z: z + sideZ * buffer }];
       const tightShoulders = [{ x: tight.x, z }, { x, z: tight.z }];
-      if (bufferedShoulders.some((point, i) => !isPathClear(point, point, radius, space) &&
-          isPathClear(tightShoulders[i], tightShoulders[i], radius, space))) add(tight);
+      let needsTightCorner = false;
+      for (let i = 0; i < 2; i++) {
+        const point = bufferedShoulders[i];
+        needsTightCorner = !isPathClear(point, point, radius, space) &&
+          isPathClear(tightShoulders[i], tightShoulders[i], radius, space);
+        yield;
+        if (needsTightCorner) break;
+      }
+      if (needsTightCorner) yield* add(tight);
     }
   }
   for (const exclusion of space.exclusions ?? []) {
@@ -155,7 +228,7 @@ function completeAroundCorners(start: Point, goal: Point, radius: number, space:
     const ringRadius = (exclusion.radius + buffer) / Math.cos(Math.PI / 32);
     for (let i = 0; i < 32; i++) {
       const angle = i * Math.PI / 16;
-      add({ x: exclusion.x + Math.cos(angle) * ringRadius, z: exclusion.z + Math.sin(angle) * ringRadius });
+      yield* add({ x: exclusion.x + Math.cos(angle) * ringRadius, z: exclusion.z + Math.sin(angle) * ringRadius });
     }
   }
   const costs = new Float64Array(points.length).fill(Infinity);
@@ -167,6 +240,7 @@ function completeAroundCorners(start: Point, goal: Point, radius: number, space:
   let closest = 0, reachedGoal = false;
   while (open.length > 0) {
     const current = open.pop();
+    yield;
     if (closed[current.id] || current.cost > costs[current.id]) continue;
     closed[current.id] = 1;
     const point = points[current.id], toGoal = distance(point, goal);
@@ -177,6 +251,9 @@ function completeAroundCorners(start: Point, goal: Point, radius: number, space:
       break;
     }
     for (let id = 1; id < points.length; id++) {
+      // Yield even for a rejected edge: high-degree visibility nodes are
+      // resumed across ticks instead of hiding quadratic work in one expansion.
+      yield;
       if (closed[id]) continue;
       const next = points[id], cost = current.cost + distance(point, next);
       if (cost >= costs[id] || !isPathClear(point, next, radius, space)) continue;
@@ -185,27 +262,27 @@ function completeAroundCorners(start: Point, goal: Point, radius: number, space:
       open.push({ id, cost, score: cost + heuristic(next) });
     }
   }
-  // Retain the grid's useful closest approach if the graph also cannot reach
-  // the destination; never replace it with a worse partial route.
-  if (!reachedGoal && gridRoute.length > 0 && distance(points[closest], goal) >= distance(gridRoute[gridRoute.length - 1], goal) - EPSILON) return gridRoute;
+  // Preserve a better closest approach found by the grid.
+  if (!reachedGoal && gridRoute.length > 0 && distance(points[closest], goal) >= distance(gridRoute[gridRoute.length - 1], goal) - EPSILON) {
+    return yield* resultFor(gridRoute, false, start);
+  }
   const route: Point[] = [];
-  for (let at = closest; at > 0; at = parents[at]) route.push(points[at]);
-  return route.reverse();
+  for (let at = closest; at > 0; at = parents[at]) { route.push(points[at]); yield; }
+  return yield* resultFor(route.reverse(), reachedGoal, start);
 }
 
-/** Deterministic eight-way A* with a geometry-aligned fallback for narrow gaps.
- * Waypoints exclude the start. An optional target radius allows contact-range
- * approaches when the exact goal cannot fit the moving body. All search caches
- * are local, so gates and broken pots take effect immediately. */
-export function findPath(start: Point, goal: Point, radius: number, space: NavigationSpace, goalRadius = 0): Point[] {
-  if (distance(start, goal) < EPSILON) return [];
-  if (isPathClear(start, goal, radius, space)) return [{ x: goal.x, z: goal.z }];
+function* searchWithCache(start: Point, goal: Point, radius: number, space: NavigationSpace, goalRadius: number, cache: GridCache): Generator<void, PathResult, void> {
+  if (distance(start, goal) < EPSILON) return { route: [], reachedGoal: true, cost: 0 };
+  const direct = isPathClear(start, goal, radius, space);
+  yield;
+  if (direct) return { route: [{ x: goal.x, z: goal.z }], reachedGoal: true, cost: distance(start, goal) };
 
   const columns = Math.floor(space.width / CELL) + 1, rows = Math.floor(space.height / CELL) + 1;
   const count = columns * rows;
   const costs = new Float64Array(count).fill(Infinity);
-  const parents = new Int32Array(count).fill(-1);
-  const closed = new Uint8Array(count), walkability = new Uint8Array(count);
+  const parents = new Int32Array(count).fill(-1), closed = new Uint8Array(count);
+  let walkability = cache.walkability.get(radius);
+  if (!walkability) { walkability = new Uint8Array(count); cache.walkability.set(radius, walkability); }
   const pointAt = (id: number): Point => ({ x: (id % columns) * CELL, z: Math.floor(id / columns) * CELL });
   const walkable = (id: number) => {
     if (walkability[id] === 0) {
@@ -215,11 +292,12 @@ export function findPath(start: Point, goal: Point, radius: number, space: Navig
     return walkability[id] === 1;
   };
   const open = new MinHeap();
-  // Attach the real (non-grid) start to nearby visible nodes. Nominal clearance
-  // here lets a body touching a wall leave it before taking the buffered route.
+  // Attach the real start to nearby visible nodes. Nominal clearance lets a
+  // body touching a wall leave it before taking the buffered route.
   const startX = Math.round(start.x / CELL), startZ = Math.round(start.z / CELL);
   for (let z = Math.max(0, startZ - 2); z <= Math.min(rows - 1, startZ + 2); z++) {
     for (let x = Math.max(0, startX - 2); x <= Math.min(columns - 1, startX + 2); x++) {
+      yield;
       const id = z * columns + x, point = pointAt(id), cost = distance(start, point);
       if (cost > CELL * 2 || !walkable(id) || !isPathClear(start, point, radius, space)) continue;
       costs[id] = cost;
@@ -227,9 +305,11 @@ export function findPath(start: Point, goal: Point, radius: number, space: Navig
     }
   }
   const goalClear = isPathClear(goal, goal, radius, space);
+  yield;
   let closest = -1, closestDistance = distance(start, goal), closestCost = Infinity, reachedGoal = false;
   while (open.length > 0) {
     const current = open.pop();
+    yield;
     if (closed[current.id] || current.cost > costs[current.id]) continue;
     closed[current.id] = 1;
     const point = pointAt(current.id), toGoal = distance(point, goal);
@@ -245,6 +325,7 @@ export function findPath(start: Point, goal: Point, radius: number, space: Navig
     }
     const x = current.id % columns, z = Math.floor(current.id / columns);
     for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) {
+      yield;
       if ((dx === 0 && dz === 0) || x + dx < 0 || x + dx >= columns || z + dz < 0 || z + dz >= rows) continue;
       const next = current.id + dz * columns + dx;
       if (closed[next] || !walkable(next)) continue;
@@ -258,25 +339,75 @@ export function findPath(start: Point, goal: Point, radius: number, space: Navig
       open.push({ id: next, cost, score: cost + distance(nextPoint, goal) });
     }
   }
-  if (closest === -1) return completeAroundCorners(start, goal, radius, space, [], goalRadius);
+  if (closest === -1) return yield* completeAroundCorners(start, goal, radius, space, [], goalRadius);
   const route: Point[] = [];
-  for (let at = closest; at !== -1; at = parents[at]) route.push(pointAt(at));
+  for (let at = closest; at !== -1; at = parents[at]) { route.push(pointAt(at)); yield; }
   route.reverse();
   if (reachedGoal && distance(route[route.length - 1], goal) > EPSILON) route.push({ x: goal.x, z: goal.z });
 
-  // String-pull only across swept-clear segments, preserving the corner space
-  // a large boss needs. The first/last links may touch their starting wall.
+  // String-pull only across swept-clear segments, preserving corner space.
   const smoothed: Point[] = [];
   let anchor = start, index = 0;
   while (index < route.length) {
     let next = index;
     for (let candidate = route.length - 1; candidate > index; candidate--) {
+      yield;
       const linkRadius = smoothed.length === 0 || (reachedGoal && candidate === route.length - 1) ? radius : radius + CLEARANCE;
       if (isPathClear(anchor, route[candidate], linkRadius, space)) { next = candidate; break; }
     }
     if (distance(anchor, route[next]) > EPSILON) smoothed.push(route[next]);
     anchor = route[next];
     index = next + 1;
+    yield;
   }
-  return reachedGoal ? smoothed : completeAroundCorners(start, goal, radius, space, smoothed, goalRadius);
+  return reachedGoal ? yield* resultFor(smoothed, true, start) : yield* completeAroundCorners(start, goal, radius, space, smoothed, goalRadius);
+}
+
+/** Composable deterministic eight-way search. Callers advancing this generator
+ * directly must keep geometry immutable; createPathSearch guards revisions. */
+export function searchPath(start: Point, goal: Point, radius: number, space: NavigationSpace, goalRadius = 0): Generator<void, PathResult, void> {
+  return searchWithCache({ ...start }, { ...goal }, radius, space, goalRadius, navigationCache(space));
+}
+
+export function createPathSearch(start: Point, goal: Point, radius: number, space: NavigationSpace, goalRadius = 0): PathSearch {
+  const cache = navigationCache(space);
+  return {
+    iterator: searchWithCache({ ...start }, { ...goal }, radius, space, goalRadius, cache),
+    space, version: spaceVersion(space), generation: cache.generation,
+  };
+}
+
+/** Advance at most maxWork candidate/edge operations, including fallback work.
+ * Partial searches deliberately expose no route until a complete safe result is
+ * available. Callers can continue following their previous clear route. */
+export function advancePathSearch(search: PathSearch, maxWork: number): PathSearchStep {
+  if (search.result) return { done: true, workUsed: 0, ...search.result, ...(search.invalidated ? { invalidated: true } : {}) };
+  const version = spaceVersion(search.space);
+  if (version.some((value, index) => value !== search.version[index]) ||
+      gridCaches.get(search.space.cacheKey ?? search.space)?.generation !== search.generation) {
+    search.invalidated = true;
+    search.result = { route: [], reachedGoal: false, cost: Infinity };
+    return { done: true, workUsed: 0, invalidated: true, ...search.result };
+  }
+  const budget = Number.isFinite(maxWork) ? Math.max(0, Math.floor(maxWork)) : 0;
+  let workUsed = 0;
+  while (workUsed < budget) {
+    const next = search.iterator.next();
+    workUsed++;
+    if (next.done) {
+      search.result = next.value;
+      return { done: true, workUsed, ...next.value };
+    }
+  }
+  return { done: false, workUsed };
+}
+
+/** Synchronous compatibility wrapper for tooling and deterministic fixtures.
+ * Simulation callers should share a fixed work budget across resumable searches. */
+export function findPath(start: Point, goal: Point, radius: number, space: NavigationSpace, goalRadius = 0): Point[] {
+  const search = createPathSearch(start, goal, radius, space, goalRadius);
+  for (;;) {
+    const result = advancePathSearch(search, 8192);
+    if (result.done) return result.route!;
+  }
 }

@@ -1,6 +1,9 @@
 import type { Breakable, Enemy, GameData, InputState, Obstacle, Particle, Point, SoundName, Zone } from './types';
-import { areaName, SANCTUARY, WORLDS } from './world';
-import { findPath, isPathClear, type NavigationSpace } from './pathfinding';
+import { areaName, NAVIGATION_PORTALS, SANCTUARY, WORLDS } from './world';
+import { isPathClear, type NavigationSpace } from './pathfinding';
+import { portalEndpoint, type NavigationPortal } from './navigation-network';
+import { beginNavigation, cancelNavigation, requestNavigation, runNavigation, solidObstacles, type NavigationRuntime } from './navigation-runtime';
+export { getNavigationStats, PATHFINDING_WORK_PER_TICK } from './navigation-runtime';
 import { recordPursuitProgress, resumePursuit, updatePursuitMemory } from './pursuit-memory';
 
 export const FIXED_DT = 1 / 60;
@@ -12,7 +15,7 @@ const distance = (a: Point, b: Point) => Math.hypot(a.x-b.x,a.z-b.z);
 const clamp = (value: number, lo: number, hi: number) => Math.max(lo,Math.min(hi,value));
 
 function enemy(id: string, zone: Zone, x: number, z: number, boss = false): Enemy {
-  return { id,zone,x,z,spawnX:x,spawnZ:z,kind:boss?'boss':'blob',hp:boss?8:2,maxHp:boss?8:2,radius:boss?.83:.43,vx:0,vz:0,facingX:Math.cos(x*.7+z),facingZ:Math.sin(x*.7+z),aggro:false,lostSightTime:0,farTime:0,pursuitBlocked:false,pursuitProbeTime:0,blockedTargetX:x,blockedTargetZ:z,hitstun:0,flash:0,contactCooldown:0,respawn:0,lastAttackId:-1,wanderAngle:x*.7+z,mode:'idle',modeTime:(x+z)%2+1,path:[],repathTime:0,stuckTime:0,progressX:x,progressZ:z,rangedCooldown:0,rangedAimX:x,rangedAimZ:z };
+  return { id,zone,x,z,spawnX:x,spawnZ:z,spawnZone:zone,kind:boss?'boss':'blob',hp:boss?8:2,maxHp:boss?8:2,radius:boss?.83:.43,vx:0,vz:0,facingX:Math.cos(x*.7+z),facingZ:Math.sin(x*.7+z),aggro:false,lostSightTime:0,farTime:0,pursuitBlocked:false,pursuitProbeTime:0,blockedTargetX:x,blockedTargetZ:z,hitstun:0,flash:0,contactCooldown:0,respawn:0,lastAttackId:-1,wanderAngle:x*.7+z,mode:'idle',modeTime:(x+z)%2+1,path:[],repathTime:0,stuckTime:0,progressX:x,progressZ:z,rangedCooldown:0,rangedAimX:x,rangedAimZ:z };
 }
 export function createInitialData(muted = false): GameData {
   const p = WORLDS.overworld.spawn;
@@ -42,18 +45,14 @@ function burst(s: GameData, p: Point, kind: Particle['kind'], color: string, cou
 function drop(s: GameData,p: Point,kind:'heart'|'rupee',value=1) {
   s.pickups.push({id:`drop-${++s.eventId}`,zone:s.zone,x:p.x,z:p.z,kind,value,age:0});
 }
-function blockedObstacles(s: GameData): Obstacle[] {
-  const obs: Obstacle[] = [...WORLDS[s.zone].obstacles,...s.breakables.filter(b=>b.zone===s.zone&&b.kind==='pot'&&!b.broken).map(b=>({id:b.id,kind:'rock' as const,x:b.x,z:b.z,w:.52,d:.52}))];
-  return s.zone==='dungeon'&&!s.gateOpen ? [...obs,{id:'locked-gate',kind:'wall',x:10,z:14,w:3,d:1}] : obs;
-}
 export function overlapsSolid(p: Point, radius: number, o: Obstacle) {
   const nearX=clamp(p.x,o.x-o.w/2,o.x+o.w/2), nearZ=clamp(p.z,o.z-o.d/2,o.z+o.d/2);
   return (p.x-nearX)**2+(p.z-nearZ)**2 < radius*radius-.000001;
 }
 // Resolve one axis at a time so running diagonally into a wall keeps the free
 // component of movement, rather than making the hero stick to the wall.
-function move(s: GameData,p: Point,dx:number,dz:number,radius:number,obs:Obstacle[]) {
-  const world=WORLDS[s.zone];
+function move(s: GameData,p: Point,dx:number,dz:number,radius:number,obs:Obstacle[],zone:Zone=s.zone) {
+  const world=WORLDS[zone];
   p.x=clamp(p.x+dx,radius+.05,world.width-radius-.05);
   if(dx!==0) for(const o of obs) if(overlapsSolid(p,radius,o)) {
     const zGap=Math.max(0,Math.abs(p.z-o.z)-o.d/2);
@@ -86,43 +85,58 @@ function hitPlayer(s: GameData,e: Enemy) {
   if(e.contactCooldown>0||e.hitstun>0)return;
   if(damagePlayer(s,e,e.kind==='boss'?2:1))e.contactCooldown=1.25;
 }
-function navigationSpace(s: GameData,e: Enemy,obstacles: Obstacle[]): NavigationSpace {
-  const world=WORLDS[s.zone];
-  return {
-    width:world.width,height:world.height,obstacles,
-    bounds:e.kind==='boss'?{minZ:15.5+e.radius}:undefined,
-    exclusions:s.zone==='overworld'?[SANCTUARY]:undefined,
-  };
-}
 function resetProgress(e: Enemy) {e.stuckTime=0;e.progressX=e.x;e.progressZ=e.z;}
 function clearPath(e: Enemy) {if(e.path.length)e.path=[];e.repathTime=0;}
 function forgetTarget(e: Enemy) {e.aggro=false;e.lostSightTime=0;e.farTime=0;e.pursuitBlocked=false;e.pursuitProbeTime=0;}
-function followPath(e: Enemy,target: Point,speed: number,dt: number,space: NavigationSpace,mode: 'chase' | 'watch' | 'return' = 'chase') {
-  // Keep open-ground steering responsive; A* is only needed when the direct
-  // corridor is obstructed. The Guardian refreshes its route four times faster.
-  if(isPathClear(e,target,e.radius,space))e.path=[{x:target.x,z:target.z}];
-  else if(e.mode!==mode||e.repathTime<=0) {
-    e.path=findPath(e,target,e.radius,space,mode==='chase'?PLAYER_RADIUS:0);
-    e.repathTime=e.kind==='boss'?.18:.75;
+function followPath(e: Enemy,target: Point,targetZone: Zone,speed: number,dt: number,nav: NavigationRuntime,mode: 'chase' | 'watch' | 'return' = 'chase') {
+  let space=nav.networks[e.kind].spaces[e.zone];
+  const hasPortals=nav.networks[e.kind].portals.some(portal=>portal.traversableByAI);
+  if(e.mode!==mode) {clearPath(e);cancelNavigation(nav,e.id);}
+  if(e.zone===targetZone&&!hasPortals&&isPathClear(e,target,e.radius,space)) {
+    e.path=[{x:target.x,z:target.z}];cancelNavigation(nav,e.id,mode);
+  } else if(e.repathTime<=0) {
+    const result=requestNavigation(nav,e,target,targetZone,mode,mode==='chase'?PLAYER_RADIUS:0);
+    if(result) {
+      e.path=result.route;
+      e.repathTime=e.kind==='boss'?.18:.75;
+    }
   }
   e.mode=mode;
   let reached=0;
   while(reached<e.path.length&&distance(e,e.path[reached])<.09) {
-    // A nearby corner can still be essential for a wide body to clear a pillar.
-    // Reach it exactly unless cutting directly to the next segment is safe.
-    if(e.path.length>reached+1&&distance(e,e.path[reached])>1e-6&&!isPathClear(e,e.path[reached+1],e.radius,space))break;
+    const waypoint=e.path[reached];
+    if(waypoint.portalId) {
+      const network=nav.networks[e.kind];
+      const portal=network.portals.find(link=>link.id===waypoint.portalId&&link.traversableByAI);
+      const from=portal&&portalEndpoint(network,portal.fromChunk,portal.fromTile);
+      const to=portal&&portalEndpoint(network,portal.toChunk,portal.toTile);
+      const landing=e.path[reached+1];
+      if(!from||!to||from.zone!==e.zone||!landing||landing.zone!==to.zone||distance(landing,to)>1e-6||
+        !isPathClear(e,from,e.radius,space)||!isPathClear(to,to,e.radius,network.spaces[to.zone])) {
+        clearPath(e);cancelNavigation(nav,e.id);e.vx=0;e.vz=0;return;
+      }
+      e.x=to.x;e.z=to.z;e.zone=to.zone;e.contactCooldown=Math.max(e.contactCooldown,1.1);
+      resetProgress(e);space=network.spaces[e.zone];reached+=2;
+      continue;
+    }
+    if(waypoint.zone&&waypoint.zone!==e.zone) {clearPath(e);e.vx=0;e.vz=0;return;}
+    // Reach tight corners exactly unless cutting to the next segment is safe.
+    if(e.path.length>reached+1&&distance(e,waypoint)>1e-6&&
+      !isPathClear(e,e.path[reached+1],e.radius,space))break;
     reached++;
   }
   if(reached)e.path=e.path.slice(reached);
   const next=e.path[0];
   if(!next){e.vx=0;e.vz=0;return;}
-  // Knockback or another creature can push a pursuer off its old corridor.
-  // Replan on the next tick instead of walking into a newly obstructed segment.
-  if(!isPathClear(e,next,e.radius,space)){e.repathTime=0;e.vx=0;e.vz=0;return;}
+  // Never steer into a blocked segment while a replacement is queued.
+  if((next.zone&&next.zone!==e.zone)||!isPathClear(e,next,e.radius,space)) {
+    e.path=[];e.repathTime=0;e.vx=0;e.vz=0;return;
+  }
   const d=distance(e,next),travel=Math.min(speed,d/dt);
   e.vx=(next.x-e.x)/d*travel;e.vz=(next.z-e.z)/d*travel;
 }
-function watchSanctuary(e: Enemy,dt: number,space: NavigationSpace) {
+function watchSanctuary(e: Enemy,dt: number,nav: NavigationRuntime) {
+  const space=nav.networks[e.kind].spaces[e.zone];
   // Guard reachable ground outside the clearing instead of repeatedly asking
   // A* to reach its forbidden center. Check adjacent points if a hedge or the
   // cottage occupies the nearest part of the perimeter.
@@ -133,7 +147,7 @@ function watchSanctuary(e: Enemy,dt: number,space: NavigationSpace) {
       const offset=Math.ceil(i/2)*(i%2===0?-1:1)*Math.PI/16;
       const target={x:SANCTUARY.x+Math.cos(angle+offset)*radius,z:SANCTUARY.z+Math.sin(angle+offset)*radius};
       if(!isPathClear(target,target,e.radius,space))continue;
-      followPath(e,target,1.95,dt,space,'watch');
+      followPath(e,target,e.zone,1.95,dt,nav,'watch');
       return;
     }
   }
@@ -150,6 +164,9 @@ function faceMovement(e: Enemy,target: Point,dt: number) {
   const turn=Math.atan2(Math.sin(desired-current),Math.cos(desired-current));
   const angle=current+clamp(turn,-12*dt,12*dt);
   e.facingX=Math.sin(angle);e.facingZ=Math.cos(angle);
+  // Pivot before walking home, including at path corners. The route restores
+  // its desired velocity next tick so a smooth turn never becomes a moonwalk.
+  if(e.mode==='return'&&moving&&Math.abs(turn)>12*dt+1e-8){e.vx=0;e.vz=0;}
 }
 function rangedFallback(s: GameData,e: Enemy,dt: number) {
   const pursuing=(e.mode==='chase'||e.mode==='charge')&&e.hitstun<=0&&e.hp>0&&s.gateOpen&&s.player.z>=15.1;
@@ -245,22 +262,32 @@ function attackTargets(s: GameData) {
   }
   if(broken)s.breakables=broken;
 }
-function transition(s: GameData,zone: Zone,point: Point) {
+function transition(s: GameData,zone: Zone,point: Point,portal: NavigationPortal) {
   s.zone=zone;Object.assign(s.player,point,{vx:0,vz:0,knockX:0,knockZ:0,invulnerable:1.4,attackTime:0});s.particles=[];s.projectiles=[];s.shake=0;s.damageFlash=0;
   for(const e of s.enemies) {
     clearPath(e);resetProgress(e);
+    if(portal.traversableByAI&&e.kind==='blob'&&e.aggro) {e.mode='chase';e.vx=0;e.vz=0;continue;}
     if(e.kind==='blob')forgetTarget(e);
     e.mode='idle';e.modeTime=0;e.vx=0;e.vz=0;
     if(e.zone===zone)e.contactCooldown=Math.max(e.contactCooldown,1.1);
   }
   sound(s,'enter');message(s,zone==='dungeon'?'A little courage. A little light. Find the old brass key.':'Fresh air. The pines welcome you home.',4.5);
 }
-function quest(s: GameData,input: InputState) {
-  const world=WORLDS[s.zone],p=s.player;
-  if(s.zone==='overworld') {
-    if(input.interact&&distance(p,world.entrance)<2)transition(s,'dungeon',WORLDS.dungeon.spawn);
-    return;
+function quest(s: GameData,input: InputState,nav: NavigationRuntime) {
+  // Player and AI use the same directed portal records. The short arrival grace
+  // avoids immediately taking the return link while the action key is held.
+  if(input.interact) for(const portal of NAVIGATION_PORTALS) {
+    const network=nav.networks.blob;
+    const from=portalEndpoint(network,portal.fromChunk,portal.fromTile);
+    const to=portalEndpoint(network,portal.toChunk,portal.toTile);
+    if(!from||!to||from.zone!==s.zone||distance(s.player,from)>=(portal.interactionRadius??1.5))continue;
+    if(s.zone==='dungeon'&&s.player.invulnerable>=1.2)continue;
+    const world=WORLDS[to.zone];
+    if(!isPathClear(to,to,PLAYER_RADIUS,{width:world.width,height:world.height,obstacles:solidObstacles(s,to.zone)}))continue;
+    transition(s,to.zone,to,portal);nav.jobs.clear();return;
   }
+  const world=WORLDS[s.zone],p=s.player;
+  if(s.zone==='overworld')return;
   if(!s.hasKey&&distance(p,world.key)<1.08) {s.hasKey=true;p.hp=Math.min(p.maxHp,p.hp+2);sound(s,'key');burst(s,world.key,'spark','#fbd67a',14);message(s,'You found the brass key! The old gate awaits.',5);}
   if(!s.gateOpen&&distance(p,world.gate)<2.1) {
     if(s.hasKey){s.gateOpen=true;sound(s,'gate');message(s,'The seal is broken. Face the Hollow Guardian.',4.5);}
@@ -270,7 +297,7 @@ function quest(s: GameData,input: InputState) {
     if(s.bossDefeated){s.chestOpen=true;s.phase='victory';sound(s,'chest');burst(s,world.chest,'spark','#ffde75',24);message(s,'A small hero. A brighter world.',99);}
     else message(s,'The Guardian guards this last ember.',3);
   }
-  if(input.interact&&distance(p,world.exit)<1.7&&p.invulnerable<1.2)transition(s,'overworld',WORLDS.overworld.exit);
+
 }
 
 export function stepGame(previous: GameData,dt: number,input: InputState): GameData {
@@ -282,7 +309,7 @@ export function stepGame(previous: GameData,dt: number,input: InputState): GameD
   // and visited areas use copy-on-write at their mutation sites instead of
   // allocating their unchanged contents sixty times per second.
   const s: GameData={...previous,player:{...previous.player},enemies:previous.enemies.map(e=>({...e})),pickups:previous.pickups.map(p=>({...p})),particles:previous.particles.map(p=>({...p})),projectiles:previous.projectiles.map(shot=>({...shot}))};
-  const p=s.player,obs=blockedObstacles(s);s.elapsed+=dt;s.shake=Math.max(0,s.shake-dt);s.damageFlash=Math.max(0,s.damageFlash-dt);s.messageTime=Math.max(0,s.messageTime-dt);
+  const p=s.player;let obs=solidObstacles(s,s.zone);s.elapsed+=dt;s.shake=Math.max(0,s.shake-dt);s.damageFlash=Math.max(0,s.damageFlash-dt);s.messageTime=Math.max(0,s.messageTime-dt);
   p.invulnerable=Math.max(0,p.invulnerable-dt);p.attackTime=Math.max(0,p.attackTime-dt);p.attackCooldown=Math.max(0,p.attackCooldown-dt);
   const inputLength=Math.hypot(input.x,input.z),ix=inputLength>1?input.x/inputLength:input.x,iz=inputLength>1?input.z/inputLength:input.z;
   if(inputLength>.05&&p.attackTime<=0) { const angle=Math.round(Math.atan2(ix,iz)/(Math.PI/4))*Math.PI/4;p.facingX=Math.sin(angle);p.facingZ=Math.cos(angle); }
@@ -291,30 +318,36 @@ export function stepGame(previous: GameData,dt: number,input: InputState): GameD
   move(s,p,(p.vx+p.knockX)*dt,(p.vz+p.knockZ)*dt,PLAYER_RADIUS,obs);p.knockX*=Math.exp(-10*dt);p.knockZ*=Math.exp(-10*dt);
   if(input.attack&&p.attackCooldown<=0) {p.attackTime=ATTACK_DURATION;p.attackCooldown=.43;p.attackId++;sound(s,'swing');}
   attackTargets(s);
-  const active=s.enemies.filter(e=>e.zone===s.zone&&e.hp>0);
+  const nav=beginNavigation(previous,s);obs=nav.obstacles[s.zone];
   for(const e of s.enemies) {
     if(e.hp<=0) {
       if(e.kind==='boss')continue;
       e.respawn=Math.max(0,e.respawn-dt);
-      if(e.respawn===0&&(e.zone!==s.zone||distance(p,{x:e.spawnX,z:e.spawnZ})>3.5)){Object.assign(e,{x:e.spawnX,z:e.spawnZ,hp:e.maxHp,vx:0,vz:0,hitstun:0,flash:0,contactCooldown:1,lastAttackId:-1,mode:'idle',rangedCooldown:0});forgetTarget(e);clearPath(e);resetProgress(e);}
+      if(e.respawn===0&&((e.spawnZone??e.zone)!==s.zone||distance(p,{x:e.spawnX,z:e.spawnZ})>3.5)){Object.assign(e,{zone:e.spawnZone??e.zone,x:e.spawnX,z:e.spawnZ,hp:e.maxHp,vx:0,vz:0,hitstun:0,flash:0,contactCooldown:1,lastAttackId:-1,mode:'idle',rangedCooldown:0});forgetTarget(e);clearPath(e);resetProgress(e);}
       continue;
     }
-    if(e.zone!==s.zone)continue;
+    const followingAcrossZones=e.kind==='blob'&&e.aggro&&e.zone!==s.zone;
+    const returningOffscreen=e.zone!==s.zone&&e.kind==='blob'&&e.mode==='return';
+    if(e.zone!==s.zone&&!followingAcrossZones&&!returningOffscreen)continue;
     e.hitstun=Math.max(0,e.hitstun-dt);e.flash=Math.max(0,e.flash-dt);e.contactCooldown=Math.max(0,e.contactCooldown-dt);e.modeTime-=dt;
     e.repathTime=Math.max(0,e.repathTime-dt);e.pursuitProbeTime=Math.max(0,e.pursuitProbeTime-dt);e.rangedCooldown=Math.max(0,e.rangedCooldown-dt);
     if(e.kind==='boss'&&(!s.gateOpen||p.z<15.1)){e.mode='idle';e.vx=0;e.vz=0;clearPath(e);continue;}
     const d=distance(e,p),inSanctuary=s.zone==='overworld'&&distance(p,SANCTUARY)<SANCTUARY.radius;
-    const navigation=navigationSpace(s,e,obs);
+    const navigation=nav.networks[e.kind].spaces[e.zone];
     if(e.kind==='blob') {
-      updatePursuitMemory(e,p,inSanctuary,dt);
+      if(e.zone===s.zone)updatePursuitMemory(e,p,inSanctuary,dt);
       // A pot breaking or a gate opening can reconnect the same destination.
       // Probe at the normal route cadence, without instantly reacquiring a
       // nearby but still unreachable hero after the stall timeout.
-      if(e.pursuitBlocked&&!inSanctuary&&d<5.7&&e.pursuitProbeTime<=0) {
-        const route=findPath(e,p,e.radius,navigation,PLAYER_RADIUS);
-        const end=route.at(-1);
-        if(end&&distance(end,p)<=e.radius+PLAYER_RADIUS+.02&&isPathClear(end,p,0,navigation)){resumePursuit(e);e.path=route;}
-        e.pursuitProbeTime=.75;
+      if(e.zone===s.zone&&e.pursuitBlocked&&!inSanctuary&&d<5.7&&e.pursuitProbeTime<=0) {
+        const result=requestNavigation(nav,e,p,s.zone,'probe',PLAYER_RADIUS);
+        if(result) {
+          const end=result.route.at(-1);
+          if(result.reachedGoal&&end&&end.zone===s.zone&&distance(end,p)<=e.radius+PLAYER_RADIUS+.02&&isPathClear(end,p,0,navigation)) {
+            resumePursuit(e);cancelNavigation(nav,e.id);e.path=result.route;e.repathTime=.75;
+          }
+          e.pursuitProbeTime=.75;
+        }
       }
     }
     if(e.hitstun<=0) {
@@ -337,14 +370,14 @@ export function stepGame(previous: GameData,dt: number,input: InputState): GameD
         }
         else if(e.mode==='idle'&&e.modeTime>0){e.vx*=Math.exp(-9*dt);e.vz*=Math.exp(-9*dt);}
         else if(d<5.6&&isPathClear(e,p,e.radius,navigation)){e.mode='windup';e.modeTime=.65;e.vx=0;e.vz=0;}
-        else followPath(e,p,2.65,dt,navigation);
+        else followPath(e,p,s.zone,2.65,dt,nav);
       } else if(e.aggro) {
-        if(inSanctuary)watchSanctuary(e,dt,navigation);
-        else followPath(e,p,1.95,dt,navigation);
+        if(inSanctuary&&e.zone===s.zone)watchSanctuary(e,dt,nav);
+        else followPath(e,p,s.zone,1.95,dt,nav);
       }
-      else if(e.mode==='return'||distance(e,{x:e.spawnX,z:e.spawnZ})>2.1) {
+      else if(e.mode==='return'||e.zone!==(e.spawnZone??e.zone)||distance(e,{x:e.spawnX,z:e.spawnZ})>2.1) {
         const home={x:e.spawnX,z:e.spawnZ};
-        if(distance(e,home)>.15)followPath(e,home,.52,dt,navigation,'return');
+        if(e.zone!==(e.spawnZone??e.zone)||distance(e,home)>.15)followPath(e,home,e.spawnZone??e.zone,.52,dt,nav,'return');
         else {e.mode='idle';e.modeTime=.7;e.vx=0;e.vz=0;}
       }
       else {
@@ -352,10 +385,13 @@ export function stepGame(previous: GameData,dt: number,input: InputState): GameD
         e.vx=Math.cos(e.wanderAngle)*.52;e.vz=Math.sin(e.wanderAngle)*.52;
       }
     } else {e.vx*=Math.exp(-5*dt);e.vz*=Math.exp(-5*dt);}
-    if(e.mode!=='chase'&&e.mode!=='watch'&&e.mode!=='return')clearPath(e);
+    if(e.mode!=='chase'&&e.mode!=='watch'&&e.mode!=='return'){clearPath(e);cancelNavigation(nav,e.id);}
     faceMovement(e,p,dt);
-    move(s,e,e.vx*dt,e.vz*dt,e.radius,obs);sanctuaryRepel(e);if(e.kind==='boss')e.z=Math.max(15.5+e.radius,e.z);
+    move(s,e,e.vx*dt,e.vz*dt,e.radius,nav.obstacles[e.zone],e.zone);sanctuaryRepel(e);if(e.kind==='boss')e.z=Math.max(15.5+e.radius,e.z);
+    if(e.zone!==s.zone&&e.kind==='blob')recordPursuitProgress(e,p,false,dt,false);
   }
+  runNavigation(nav);
+  const active=s.enemies.filter(e=>e.zone===s.zone&&e.hp>0);
   // Several relaxed passes prevent a cluster from sharing a position while
   // preserving static-wall collision. Contact occurs before separating bodies.
   for(let pass=0;pass<4;pass++) {
@@ -390,7 +426,7 @@ export function stepGame(previous: GameData,dt: number,input: InputState): GameD
   s.pickups=s.pickups.filter(pickup=>pickup.age>=0&&pickup.age<90);
   for(const part of s.particles){part.life-=dt;part.x+=part.vx*dt;part.z+=part.vz*dt;part.y=Math.max(.02,part.y+part.vy*dt);part.vy-=9*dt;}
   s.particles=s.particles.filter(part=>part.life>0);
-  if(s.phase==='playing')quest(s,input);
+  if(s.phase==='playing')quest(s,input,nav);
   s.area=areaName(s.zone,p);if(!s.visited.includes(s.area))s.visited=[...s.visited,s.area];
   return s;
 }

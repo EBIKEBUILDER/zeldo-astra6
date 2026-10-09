@@ -105,6 +105,40 @@ test('spawn safety protects the hero while an alerted monster remembers a brief 
   assert.equal(state.player.hp, state.player.maxHp);
 });
 
+for (const dt of [FIXED_DT, .05]) {
+  test(`a returning blob turns in place before walking home at a ${dt}-second timestep`, () => {
+    const home = { x: 29, z: 13 }, start = { x: 33, z: 13 };
+    let state = encounter(home, { x: 42, z: 13 });
+    Object.assign(state.enemies[0], { ...start, mode: 'return', facingX: 1, facingZ: 0 });
+    let turnedInPlace = false, firstMovementTime = 0, returnedHome = false;
+    for (let frame = 0; frame < Math.ceil(10 / dt); frame++) {
+      const before = state.enemies[0];
+      state = stepGame(state, dt, idle);
+      const enemy = state.enemies[0], dx = enemy.x - before.x, dz = enemy.z - before.z;
+      const travel = Math.hypot(dx, dz);
+      assert.equal(enemy.aggro, false);
+      if (frame === 0) {
+        assert.equal(travel, 0, 'Turn away from the hero before taking the first step home');
+        assert.notEqual(enemy.facingZ, before.facingZ, 'Rotate smoothly instead of waiting motionless or snapping');
+        turnedInPlace = true;
+      }
+      if (travel > 1e-8) {
+        firstMovementTime ||= (frame + 1) * dt;
+        assert.ok((enemy.facingX * dx + enemy.facingZ * dz) / travel > 1 - 1e-8,
+          'Every voluntary return step must face its actual direction of travel');
+        assert.ok(Math.abs(travel / dt - .52) < 1e-8, 'Resume the normal walking speed after turning');
+      }
+      if (distance(enemy, home) < .15) { returnedHome = true; break; }
+    }
+    assert.ok(turnedInPlace && firstMovementTime > 0 && firstMovementTime <= .3 + dt);
+    assert.ok(returnedHome, 'Turning in place must not prevent completing the return');
+    state = stepGame(state, dt, idle);
+    assert.equal(state.enemies[0].mode, 'idle');
+    assert.equal(state.enemies[0].vx, 0);
+    assert.equal(state.enemies[0].vz, 0);
+  });
+}
+
 test('a disengaged blob turns and walks home around a hedge instead of sliding backward into it', () => {
   const home = { x: 33, z: 7 };
   let state = encounter(home, { x: 35, z: 7 });
@@ -115,18 +149,24 @@ test('a disengaged blob turns and walks home around a hedge instead of sliding b
   Object.assign(state.player, { x: SANCTUARY.x, z: SANCTUARY.z });
   // Isolate the return movement after the new concealment grace period ends.
   state.enemies[0].lostSightTime = 18;
-  let detour = 0, backwardFrames = 0, returnedHome = false;
+  let detour = 0, returnedHome = false;
   for (let frame = 0; frame < 2400; frame++) {
+    const before = state.enemies[0];
     state = stepGame(state, FIXED_DT, idle);
     const enemy = state.enemies[0], speed = Math.hypot(enemy.vx, enemy.vz);
     assert.equal(enemy.aggro, false);
     assert.ok(speed <= .52 + 1e-8, 'Keep the existing unalerted walking speed');
     assert.ok(!WORLDS.overworld.obstacles.some(obstacle => overlapsSolid(enemy, enemy.radius - .001, obstacle)));
     assert.ok(Math.abs(Math.hypot(enemy.facingX, enemy.facingZ) - 1) < 1e-8);
+    const dx = enemy.x - before.x, dz = enemy.z - before.z, travel = Math.hypot(dx, dz);
     if (speed > .01) {
-      const forward = (enemy.facingX * enemy.vx + enemy.facingZ * enemy.vz) / speed;
-      backwardFrames = forward < 0 ? backwardFrames + 1 : 0;
-      assert.ok(backwardFrames < 16, 'Turn to face the route promptly rather than backing home while watching the hero');
+      assert.ok((enemy.facingX * enemy.vx + enemy.facingZ * enemy.vz) / speed > 1 - 1e-8,
+        'Finish facing the route before taking each step');
+    }
+    if (travel > 1e-8) {
+      const forward = (enemy.facingX * dx + enemy.facingZ * dz) / travel;
+      // Rounded-wall collision can slightly deflect an otherwise clear step.
+      assert.ok(forward > .99, 'Face actual travel throughout the detour, including at route corners');
     }
     detour = Math.max(detour, Math.abs(enemy.x - home.x));
     if (distance(enemy, home) < .16) { returnedHome = true; break; }

@@ -57,9 +57,13 @@ export function createGameRenderer(canvas: HTMLCanvasElement) {
     const mesh = finish(B.MeshBuilder.CreateBox(`${name}-${serial++}`, { width: w, height: h, depth: d }, scene), color, parent, cast);
     mesh.position.set(x, y, z); return mesh;
   }
-  function ball(name: string, size: number, x: number, y: number, z: number, color: string, parent?: B.Node, scale?: [number, number, number], cast = true) {
-    const mesh = finish(B.MeshBuilder.CreateSphere(`${name}-${serial++}`, { diameter: size, segments: 5 }, scene), color, parent, cast);
-    mesh.position.set(x, y, z); if (scale) mesh.scaling.set(...scale); mesh.convertToFlatShadedMesh(); return mesh;
+  function ball(name: string, size: number, x: number, y: number, z: number, color: string, parent?: B.Node, scale?: [number, number, number], cast = true, surface: 'faceted' | 'smooth' = 'faceted') {
+    const smooth = surface === 'smooth';
+    const mesh = finish(B.MeshBuilder.CreateSphere(`${name}-${serial++}`, { diameter: size, segments: smooth ? 20 : 5 }, scene), color, parent, cast);
+    mesh.position.set(x, y, z); if (scale) mesh.scaling.set(...scale);
+    // Rounded enemies keep the sphere's interpolated normals for soft lighting.
+    if (!smooth) mesh.convertToFlatShadedMesh();
+    return mesh;
   }
   function cylinder(name: string, top: number, bottom: number, height: number, x: number, y: number, z: number, color: string, parent?: B.Node, sides = 7, cast = true) {
     const mesh = finish(B.MeshBuilder.CreateCylinder(`${name}-${serial++}`, { diameterTop: top, diameterBottom: bottom, height, tessellation: sides }, scene), color, parent, cast);
@@ -443,13 +447,13 @@ export function createGameRenderer(canvas: HTMLCanvasElement) {
   }
   function enemyNode(id: string, boss: boolean) {
     const node = group(boss ? 'ember-guardian' : 'moss-slime');
-    const body = ball('slime-body', boss ? 2.28 : 1.05, 0, boss ? .78 : .43, 0, boss ? '#ac704e' : '#889552', node, [1, .73, 1]);
+    const body = ball('slime-body', boss ? 2.28 : 1.05, 0, boss ? .78 : .43, 0, boss ? '#ac704e' : '#889552', node, [1, .73, 1], true, 'smooth');
     const browColor = boss ? '#694e3c' : '#657b42';
-    ball('slime-brow', boss ? 1.72 : .74, 0, boss ? 1.26 : .65, -.09, browColor, node, [1, .48, .86]);
+    ball('slime-brow', boss ? 1.72 : .74, 0, boss ? 1.26 : .65, -.09, browColor, node, [1, .48, .86], true, 'smooth');
     const eyes: B.Mesh[] = [];
     for (const x of [-1, 1]) {
-      eyes.push(ball('slime-eye', boss ? .24 : .14, x * (boss ? .36 : .17), boss ? .94 : .49, boss ? .99 : .46, '#f4e6ba', node, [.8, 1.1, .52]));
-      eyes.push(ball('slime-pupil', boss ? .11 : .065, x * (boss ? .35 : .17), boss ? .92 : .48, boss ? 1.1 : .525, '#3f4735', node, [.8, 1.1, .55], false));
+      eyes.push(ball('slime-eye', boss ? .24 : .14, x * (boss ? .36 : .17), boss ? .94 : .49, boss ? .99 : .46, '#f4e6ba', node, [.8, 1.1, .52], true, 'smooth'));
+      eyes.push(ball('slime-pupil', boss ? .11 : .065, x * (boss ? .35 : .17), boss ? .92 : .48, boss ? 1.1 : .525, '#3f4735', node, [.8, 1.1, .55], false, 'smooth'));
     }
     if (boss) {
       cylinder('guardian-crown', 1.1, 1.28, .2, 0, 1.62, -.05, '#d1af6b', node, 6);
@@ -458,10 +462,10 @@ export function createGameRenderer(canvas: HTMLCanvasElement) {
         cylinder('crown-spike', 0, .26, .45, Math.sin(a) * .48, 1.92, Math.cos(a) * .48 -.05, '#e9c581', node, 4);
       }
       diamond('ember-heart', 0, .76, -1.07, '#eea05b', node, .20, .3);
-      for (const x of [-1, 1]) ball('guardian-shoulder', .7, x * .93, .67, -.10, '#786c4a', node, [1, .7, 1]);
+      for (const x of [-1, 1]) ball('guardian-shoulder', .7, x * .93, .67, -.10, '#786c4a', node, [1, .7, 1], true, 'smooth');
     } else {
       const sprout = cylinder('slime-sprout', .045, .075, .35, 0, .91, -.04, '#526c3e', node, 4, false); sprout.rotation.z = .25;
-      ball('slime-leaf', .29, .12, 1.04, -.03, '#9aae65', node, [1.3, .23, .75], false).rotation.z = .35;
+      ball('slime-leaf', .29, .12, 1.04, -.03, '#9aae65', node, [1.3, .23, .75], false, 'smooth').rotation.z = .35;
     }
     const danger = boss ? ring('charge-warning', 1.55, .09, 0, .055, 0, '#e6a063', node) : null;
     if (danger) { danger.material = mat('#efa567', .55, .7); danger.setEnabled(false); }
