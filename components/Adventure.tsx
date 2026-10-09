@@ -21,14 +21,19 @@ function interactionFor(s: GameData) {
   if (s.phase !== 'playing') return '';
   const w = WORLDS[s.zone];
   const near = (point: {x:number;z:number}, range:number) => Math.hypot(s.player.x-point.x,s.player.z-point.z) < range;
-  if (s.zone === 'overworld' && near(w.entrance, 2)) return 'Enter';
-  if (s.zone === 'dungeon' && near(w.exit, 1.7)) return 'Leave';
   if (s.zone === 'dungeon' && near(w.chest, 1.9)) return s.bossDefeated ? 'Open' : 'Inspect';
   if (s.zone === 'dungeon' && !s.gateOpen && near(w.gate, 2.1)) return 'Inspect';
   return '';
 }
 
-const interactionHints: Record<string,string> = {Enter:'Enter the Lantern Vault',Leave:'Return to the valley',Open:'Open the ember chest',Inspect:'Inspect the old seal'};
+const interactionHints: Record<string,string> = {Open:'Open the ember chest',Inspect:'Inspect the old seal'};
+
+function passageHintFor(s: GameData) {
+  if (s.phase !== 'playing') return '';
+  const target = s.zone === 'overworld' ? WORLDS.overworld.entrance : WORLDS.dungeon.exit;
+  if (Math.hypot(s.player.x - target.x, s.player.z - target.z) >= 3.5) return '';
+  return s.zone === 'overworld' ? 'Walk into the shrine to enter' : 'Walk down the steps to leave';
+}
 
 function BossHealth() {
   const hp = useGameStore(s => s.enemies.find(e => e.kind === 'boss')?.hp ?? 0);
@@ -57,6 +62,7 @@ export default function Adventure() {
   const zone = useGameStore(s => s.zone);
   const chestOpen = useGameStore(s => s.chestOpen);
   const interaction = useGameStore(interactionFor);
+  const passageHint = useGameStore(passageHintFor);
   const message = useGameStore(s => s.messageTime > 0 ? s.message : '');
   const isTitle = phase === 'title';
   const active = phase === 'playing' || phase === 'paused';
@@ -127,7 +133,7 @@ export default function Adventure() {
         <BossHealth />
         <QuestJournal />
         <AdventureMap expanded={modal === 'map'} onExpand={() => openModal('map')} onClose={closeModal} />
-        {interaction && <div className="context-hint"><kbd className="desktop-copy">E</kbd><Icon name={interaction === 'Open' ? 'key' : 'arrow'} size={16}/>{interactionHints[interaction]}</div>}
+        {(interaction || passageHint) && <div className="context-hint">{interaction && <kbd className="desktop-copy">E</kbd>}<Icon name={interaction === 'Open' ? 'key' : 'arrow'} size={16}/>{interaction ? interactionHints[interaction] : passageHint}</div>}
         <div className="adventure-toolbar">
           <span className="equipped-sword"><Icon name="sword" size={24}/><span><small>EQUIPPED</small>Worn sword</span><kbd>Space</kbd></span>
           <button className="gear-toggle" onClick={() => openModal('inventory')} aria-label="Open satchel"><Icon name="satchel" size={23}/><span>Satchel</span>{hasKey && <span className="item-notice"/>}</button>
@@ -143,7 +149,7 @@ export default function Adventure() {
       {phase === 'paused' && !modal && <div className="modal-shade"><section className="story-modal pause-modal"><span className="modal-illustration"><Icon name="leaf" size={35} /></span><span className="eyebrow">A MOMENT IN THE MOSS</span><h2>Take a little breath.</h2><p>The valley will be right here.</p><button className="primary-button" onClick={() => controls.current?.pause()}>Continue adventure <Icon name="arrow" /></button><button className="subtle-button" onClick={() => openModal('help')}>A little help?</button><span className="modal-keyhint desktop-copy"><kbd>Esc</kbd> to return</span></section></div>}
       {(phase === 'gameover' || phase === 'victory') && <div className="modal-shade ending-shade"><section className={`story-modal ending-modal ${phase === 'victory' ? 'victory-modal' : ''}`}><span className="modal-illustration"><Icon name={phase === 'victory' ? 'flame' : 'heart'} size={44} /></span><span className="eyebrow">{phase === 'victory' ? 'EVERY LITTLE LIGHT MATTERS' : 'THIS ISN’T THE END'}</span><h2>{phase === 'victory' ? <>A little ember.<br /><em>A grand adventure.</em></> : <>Even brave souls<br />need another try.</>}</h2><p>{phase === 'victory' ? 'You found the last ember and brought a little warmth back to the valley. The moss will remember you.' : 'The path is still there. Pick up your sword, catch your breath, and make this story yours.'}</p><div className="ending-stats"><div><Icon name="clock" size={18} /><strong>{formatTime(time)}</strong><span>TIME WANDERED</span></div><div><Icon name="gem" size={18} /><strong>{rupees}</strong><span>RUPEES GATHERED</span></div></div><button className="primary-button" onClick={() => { setModal(null); resumeAfterModal.current = false; controls.current?.restart(); }}><Icon name={phase === 'victory' ? 'reset' : 'sword'} size={20} />{phase === 'victory' ? 'Wander once more' : 'Try again'}<Icon name="arrow" size={20} /></button><span className="modal-keyhint desktop-copy">or press <kbd>Enter</kbd></span></section></div>}
 
-      {modal === 'help' && <div className="modal-shade" onClick={closeModal}><section ref={modalRef} className="story-modal help-modal" role="dialog" aria-modal="true" aria-label="How to play" onClick={e => e.stopPropagation()}><button className="close-button" onClick={closeModal} aria-label="Close instructions"><Icon name="close" /></button><span className="eyebrow">A SMALL FIELD GUIDE</span><h2>A little courage.<br /><em>A few simple moves.</em></h2><div className="help-controls"><div><span><strong className="mobile-copy">Drag joystick</strong><span className="desktop-copy"><kbd>W A S D</kbd><small>or arrow keys</small></span></span><p>Find your own way<span>Move freely; a light joystick tilt lets you walk slowly.</span></p></div><div><span><strong className="mobile-copy">Hold attack</strong><span className="desktop-copy"><kbd>Space</kbd><small>or click the world</small></span></span><p>Make a little room<span>Swing toward the way you’re facing.</span></p></div><div><span><strong className="mobile-copy">Tap interact</strong><kbd className="desktop-copy">E</kbd></span><p>See what’s inside<span>Use the nearby action to enter, inspect, or open treasure.</span></p></div><div><span><strong className="mobile-copy">Map & pause</strong><span className="desktop-copy"><kbd>Esc</kbd> <kbd>M</kbd></span></span><p>Take it easy<span>Opening the map or satchel pauses your adventure.</span></p></div></div><div className="help-tip"><Icon name="leaf" size={20} /><p>Follow the pale path northeast, across the river, to the old shrine. Cut grass and break pots for hearts and rupees. Your home clearing is always safe. Follow the gold marker on your map. Violet wisps can be returned with your sword.</p></div><button className="primary-button" onClick={closeModal}>I’m ready <Icon name="arrow" size={19} /></button></section></div>}
+      {modal === 'help' && <div className="modal-shade" onClick={closeModal}><section ref={modalRef} className="story-modal help-modal" role="dialog" aria-modal="true" aria-label="How to play" onClick={e => e.stopPropagation()}><button className="close-button" onClick={closeModal} aria-label="Close instructions"><Icon name="close" /></button><span className="eyebrow">A SMALL FIELD GUIDE</span><h2>A little courage.<br /><em>A few simple moves.</em></h2><div className="help-controls"><div><span><strong className="mobile-copy">Drag joystick</strong><span className="desktop-copy"><kbd>W A S D</kbd><small>or arrow keys</small></span></span><p>Find your own way<span>Move freely; a light joystick tilt lets you walk slowly.</span></p></div><div><span><strong className="mobile-copy">Hold attack</strong><span className="desktop-copy"><kbd>Space</kbd><small>or click the world</small></span></span><p>Make a little room<span>Swing toward the way you’re facing.</span></p></div><div><span><strong className="mobile-copy">Tap interact</strong><kbd className="desktop-copy">E</kbd></span><p>See what’s inside<span>Walk through doorways automatically. Use the action to inspect or open treasure.</span></p></div><div><span><strong className="mobile-copy">Map & pause</strong><span className="desktop-copy"><kbd>Esc</kbd> <kbd>M</kbd></span></span><p>Take it easy<span>Opening the map or satchel pauses your adventure.</span></p></div></div><div className="help-tip"><Icon name="leaf" size={20} /><p>Follow the pale path northeast, across the river, to the old shrine. Cut grass and break pots for hearts and rupees. Your home clearing is always safe. Follow the gold marker on your map. Dodge the Guardian’s amber lunge lane and violet landing circles. Low wisps can be returned with your sword.</p></div><button className="primary-button" onClick={closeModal}>I’m ready <Icon name="arrow" size={19} /></button></section></div>}
       {modal === 'inventory' && <div className="modal-shade" onClick={closeModal}><section ref={modalRef} className="story-modal inventory-modal" role="dialog" aria-modal="true" aria-label="Traveler’s satchel" onClick={e => e.stopPropagation()}>
         <button className="close-button" aria-label="Close satchel" onClick={closeModal}><Icon name="close"/></button>
         <span className="eyebrow">YOUR ADVENTURE · CHAPTER I</span><h2>Traveler’s satchel</h2><p>A small collection. A long way to go.</p>

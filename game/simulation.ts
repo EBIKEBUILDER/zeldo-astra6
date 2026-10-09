@@ -1,15 +1,16 @@
-import type { Breakable, Enemy, GameData, InputState, Obstacle, Particle, Point, SoundName, Zone } from './types';
+import type { Breakable, Enemy, GameData, InputState, Obstacle, Particle, Point, Projectile, SoundName, Zone } from './types';
 import { areaName, NAVIGATION_PORTALS, SANCTUARY, WORLDS } from './world';
 import { isPathClear, type NavigationSpace } from './pathfinding';
 import { portalEndpoint, type NavigationPortal } from './navigation-network';
 import { beginNavigation, cancelNavigation, requestNavigation, runNavigation, solidObstacles, type NavigationRuntime } from './navigation-runtime';
 export { getNavigationStats, PATHFINDING_WORK_PER_TICK } from './navigation-runtime';
 import { recordPursuitProgress, resumePursuit, updatePursuitMemory } from './pursuit-memory';
+import { BOSS_MELEE_WINDUP, BOSS_CHARGE_DURATION, BOSS_CHARGE_SPEED, BOSS_RECOVERY, BOSS_RANGED_WINDUP, BOSS_RANGED_DISTANCE, BOSS_RANGED_COOLDOWN, BOSS_HAZARD_RADIUS, BOSS_HAZARD_LIFETIME, BOSS_MAX_HAZARDS, bossLobDuration, bossLobHeight } from './boss-attacks';
+export { BOSS_RANGED_WINDUP } from './boss-attacks';
 
 export const FIXED_DT = 1 / 60;
 export const PLAYER_RADIUS = .34;
 export const ATTACK_DURATION = .28;
-export const BOSS_RANGED_WINDUP = .8;
 const TAU = Math.PI * 2;
 const distance = (a: Point, b: Point) => Math.hypot(a.x-b.x,a.z-b.z);
 const clamp = (value: number, lo: number, hi: number) => Math.max(lo,Math.min(hi,value));
@@ -23,14 +24,14 @@ export function createInitialData(muted = false): GameData {
     enemy('clover-1','overworld',16,7),enemy('clover-2','overworld',20,15.7),enemy('pine-1','overworld',8,18),
     enemy('pine-2','overworld',16.5,20.5),enemy('crossing-1','overworld',29.4,13),enemy('orchard-1','overworld',34,7),
     enemy('orchard-2','overworld',42,11),enemy('elder-1','overworld',36,19.8),enemy('elder-2','overworld',41.5,18),
-    enemy('hall-1','dungeon',12.4,8.7),enemy('hall-2','dungeon',14.6,10.9),enemy('ember-warden','dungeon',10,21,true),
+    enemy('hall-entry','dungeon',7.4,6),enemy('hall-1','dungeon',12.4,8.7),enemy('hall-2','dungeon',14.6,10.9),enemy('ember-warden','dungeon',10,21,true),
   ];
   const breakables: Breakable[] = [];
   const grassPatches = [[10.6,5],[11.3,5],[11.9,5.4],[14.3,6.8],[16.5,10.8],[17.4,11],[19.4,11.2],[20,11.5],[7.5,14],[8.2,14.5],[10.7,17.6],[11.5,17.8],[15,19.4],[17.8,23],[19.2,17.3],[27.8,12],[28.5,12],[29.1,12.1],[30,15],[32.2,14.3],[35.9,10.4],[37,10.6],[41,12.8],[42,13],[34,18.8],[35,20.4],[38.3,21.8],[40.3,21],[44,18.8]];
   grassPatches.forEach(([x,z],i)=>breakables.push({id:`grass-${i}`,zone:'overworld',kind:'grass',x,z,broken:false,lastAttackId:-1}));
   [[8,10.6],[8.8,10.6],[40,23.8],[44,23.8]].forEach(([x,z],i)=>breakables.push({id:`pot-field-${i}`,zone:'overworld',kind:'pot',x,z,broken:false,lastAttackId:-1}));
   [[3,3],[3,10.9],[4,11.2],[16.8,3.4],[16,11.8],[3,17],[17,17],[4.5,25],[15.5,25]].forEach(([x,z],i)=>breakables.push({id:`pot-hall-${i}`,zone:'dungeon',kind:'pot',x,z,broken:false,lastAttackId:-1}));
-  return {phase:'title',zone:'overworld',player:{...p,vx:0,vz:0,facingX:0,facingZ:1,hp:6,maxHp:6,invulnerable:0,attackTime:0,attackCooldown:0,attackId:0,knockX:0,knockZ:0},enemies,breakables,pickups:[],particles:[],projectiles:[],sounds:[],elapsed:0,rupees:0,hasKey:false,gateOpen:false,bossDefeated:false,chestOpen:false,area:areaName('overworld',p),message:'',messageTime:0,shake:0,damageFlash:0,muted,seed:72819,eventId:0,visited:["Willow’s Rest"]};
+  return {phase:'title',zone:'overworld',player:{...p,vx:0,vz:0,facingX:0,facingZ:1,hp:6,maxHp:6,invulnerable:0,attackTime:0,attackCooldown:0,attackId:0,knockX:0,knockZ:0},enemies,breakables,pickups:[],particles:[],projectiles:[],hazards:[],sounds:[],elapsed:0,rupees:0,hasKey:false,gateOpen:false,bossDefeated:false,chestOpen:false,area:areaName('overworld',p),message:'',messageTime:0,shake:0,damageFlash:0,muted,seed:72819,eventId:0,visited:["Willow’s Rest"]};
 }
 function random(s: GameData) { s.seed=(Math.imul(s.seed,1664525)+1013904223)>>>0;return s.seed/4294967296; }
 function sound(s: GameData, name: SoundName) { s.sounds=[...s.sounds.slice(-27),{id:++s.eventId,name}]; }
@@ -168,48 +169,91 @@ function faceMovement(e: Enemy,target: Point,dt: number) {
   // its desired velocity next tick so a smooth turn never becomes a moonwalk.
   if(e.mode==='return'&&moving&&Math.abs(turn)>12*dt+1e-8){e.vx=0;e.vz=0;}
 }
-function rangedFallback(s: GameData,e: Enemy,dt: number) {
-  const pursuing=(e.mode==='chase'||e.mode==='charge')&&e.hitstun<=0&&e.hp>0&&s.gateOpen&&s.player.z>=15.1;
-  if(!pursuing||distance(e,s.player)<=e.radius+PLAYER_RADIUS+.12){resetProgress(e);return;}
-  // Measure actual displacement after wall and body separation, not desired
-  // velocity. A charge pinned against scenery counts too; windups, recovery,
-  // hitstun, and melee contact are deliberate stops and reset the timer above.
-  if(distance(e,{x:e.progressX,z:e.progressZ})>=.16){resetProgress(e);return;}
-  e.stuckTime+=dt;
-  if(e.stuckTime+1e-8<.5||e.rangedCooldown>0)return;
-  // Commit the aim before firing. The warning gives a cornered hero time to
-  // sidestep, or face the incoming wisp and return it with a sword swing.
+function beginRanged(s: GameData,e: Enemy) {
   e.mode='ranged-windup';e.modeTime=BOSS_RANGED_WINDUP;
   e.rangedAimX=s.player.x;e.rangedAimZ=s.player.z;
   e.vx=0;e.vz=0;clearPath(e);resetProgress(e);
   sound(s,'ranged-charge');
 }
+function rangedFallback(s: GameData,e: Enemy,dt: number) {
+  if(e.hp<=0||!s.gateOpen||s.player.z<15.1){resetProgress(e);return;}
+  // A blocked lunge may request the next ranged attack, but its full charge and
+  // recovery always finish first. Recovery itself never adds to the stall time.
+  if(e.mode==='idle'&&e.modeTime>0&&e.stuckTime+1e-8>=.5)return;
+  const pursuing=(e.mode==='chase'||e.mode==='charge')&&e.hitstun<=0;
+  if(!pursuing||distance(e,s.player)<=e.radius+PLAYER_RADIUS+.12){resetProgress(e);return;}
+  if(distance(e,{x:e.progressX,z:e.progressZ})>=.16){resetProgress(e);return;}
+  e.stuckTime+=dt;
+  if(e.mode==='charge'||e.stuckTime+1e-8<.5||e.rangedCooldown>0)return;
+  beginRanged(s,e);
+}
 function fireGuardianWisp(s: GameData,e: Enemy) {
-  const dx=e.rangedAimX-e.x,dz=e.rangedAimZ-e.z,d=Math.hypot(dx,dz)||1;
+  const dx=e.rangedAimX-e.x,dz=e.rangedAimZ-e.z,duration=bossLobDuration(Math.hypot(dx,dz));
   s.projectiles.push({id:++s.eventId,zone:s.zone,ownerId:e.id,x:e.x,z:e.z,
-    vx:dx/d*7.2,vz:dz/d*7.2,radius:.18,life:4,age:0,reflected:false});
-  e.rangedCooldown=3;e.mode='idle';e.modeTime=.5;e.vx=0;e.vz=0;
+    vx:dx/duration,vz:dz/duration,radius:.18,life:duration+.1,age:0,reflected:false,
+    lob:{startX:e.x,startZ:e.z,targetX:e.rangedAimX,targetZ:e.rangedAimZ,duration}});
+  e.rangedCooldown=BOSS_RANGED_COOLDOWN;e.mode='idle';e.modeTime=BOSS_RECOVERY;e.vx=0;e.vz=0;
   sound(s,'ranged-fire');burst(s,e,'spark','#b8a4ff',8);
+}
+function damageEnemy(e: Enemy,amount: number,knockX: number,knockZ: number,hitstun: number): boolean {
+  // All attack damage shares this guard: an active lunge cannot lose health,
+  // flash, stagger, or have its locked velocity replaced by a returned shot.
+  if(e.hp<=0||(e.kind==='boss'&&e.mode==='charge'))return false;
+  e.hp=Math.max(0,e.hp-amount);e.flash=.15;e.hitstun=hitstun;e.repathTime=0;e.vx=knockX;e.vz=knockZ;
+  return true;
 }
 function defeatEnemy(s: GameData,e: Enemy) {
   burst(s,e,'poof',e.kind==='boss'?'#eaaa73':'#b7dd88',15);sound(s,'death');e.respawn=e.kind==='boss'?0:20;
-  if(e.kind==='boss') {s.bossDefeated=true;message(s,'The Guardian rests. The ember is yours to claim.',5);for(let i=0;i<5;i++)drop(s,{x:e.x+(i-2)*.35,z:e.z+.2},'rupee',2);}
+  if(e.kind==='boss') {s.bossDefeated=true;s.projectiles=s.projectiles.filter(shot=>shot.ownerId!==e.id);s.hazards=s.hazards.filter(hazard=>hazard.ownerId!==e.id);message(s,'The Guardian rests. The ember is yours to claim.',5);for(let i=0;i<5;i++)drop(s,{x:e.x+(i-2)*.35,z:e.z+.2},'rupee',2);}
   else {drop(s,e,'rupee',1+Math.floor(random(s)*3));if(s.player.hp<4&&random(s)<.4)drop(s,{x:e.x+.35,z:e.z},'heart',2);}
+}
+function explodeGuardianWisp(s: GameData,shot: Projectile) {
+  shot.life=0;
+  s.hazards.push({id:++s.eventId,zone:shot.zone,ownerId:shot.ownerId,x:shot.x,z:shot.z,
+    radius:BOSS_HAZARD_RADIUS,life:BOSS_HAZARD_LIFETIME,maxLife:BOSS_HAZARD_LIFETIME});
+  if(s.hazards.length>BOSS_MAX_HAZARDS)s.hazards.splice(0,s.hazards.length-BOSS_MAX_HAZARDS);
+  if(distance(s.player,shot)<=BOSS_HAZARD_RADIUS+PLAYER_RADIUS)damagePlayer(s,shot,2);
+  sound(s,'ranged-explode');burst(s,shot,'spark','#b8a4ff',16);s.shake=Math.max(s.shake,.1);
+}
+function advanceHazards(s: GameData,dt: number) {
+  for(const hazard of s.hazards) {
+    const owner=s.enemies.find(e=>e.id===hazard.ownerId);
+    if(hazard.zone!==s.zone||!owner||owner.hp<=0||!s.gateOpen||s.player.z<15.1){hazard.life=0;continue;}
+    hazard.life=Math.max(0,hazard.life-dt);
+    if(hazard.life>0&&distance(s.player,hazard)<=hazard.radius+PLAYER_RADIUS)damagePlayer(s,hazard,1);
+  }
+  s.hazards=s.hazards.filter(hazard=>hazard.life>0);
 }
 function advanceProjectiles(s: GameData,dt: number,obstacles: Obstacle[]) {
   const world=WORLDS[s.zone],space:NavigationSpace={width:world.width,height:world.height,obstacles};
   for(const shot of s.projectiles) {
     const owner=s.enemies.find(e=>e.id===shot.ownerId);
-    if(shot.zone!==s.zone||!owner||owner.hp<=0||s.player.z<15.1){shot.life=0;continue;}
-    shot.age+=dt;shot.life-=dt;
+    if(shot.zone!==s.zone||!owner||owner.hp<=0||!s.gateOpen||s.player.z<15.1){shot.life=0;continue;}
+    shot.life-=dt;
     // Short swept segments keep even a maximum-delta frame from skipping a
     // thin obstacle or the player. A shot is always consumed on impact.
     const steps=Math.max(1,Math.ceil(Math.hypot(shot.vx,shot.vz)*dt/(shot.radius*.5)));
     for(let i=0;i<steps&&shot.life>0;i++) {
-      if(!shot.reflected&&s.player.attackTime>0&&swingHits(s,shot,shot.radius)&&isPathClear(s.player,shot,0,space)) {
+      shot.age+=dt/steps;
+      if(shot.lob&&!shot.reflected) {
+        const progress=Math.min(1,shot.age/shot.lob.duration);
+        shot.x=shot.lob.startX+(shot.lob.targetX-shot.lob.startX)*progress;
+        shot.z=shot.lob.startZ+(shot.lob.targetZ-shot.lob.startZ)*progress;
+      }
+      const withinSwordHeight=!shot.lob||bossLobHeight(shot.age,shot.lob.duration)<=1.3;
+      if(!shot.reflected&&withinSwordHeight&&s.player.attackTime>0&&swingHits(s,shot,shot.radius)&&isPathClear(s.player,shot,0,space)) {
         const d=distance(shot,owner)||1;
-        shot.vx=(owner.x-shot.x)/d*7.2;shot.vz=(owner.z-shot.z)/d*7.2;shot.reflected=true;shot.life=4;
+        shot.vx=(owner.x-shot.x)/d*7.2;shot.vz=(owner.z-shot.z)/d*7.2;shot.reflected=true;shot.life=4;delete shot.lob;
         sound(s,'ranged-parry');burst(s,shot,'spark','#baf5ce',9);
+      }
+      if(shot.lob&&!shot.reflected) {
+        // Its ground position can cross cover and the hero while airborne;
+        // only the locked landing circle can cause an impact or leave a pool.
+        if(shot.age+1e-8>=shot.lob.duration) {
+          shot.x=shot.lob.targetX;shot.z=shot.lob.targetZ;
+          explodeGuardianWisp(s,shot);
+        }
+        continue;
       }
       const next={x:shot.x+shot.vx*dt/steps,z:shot.z+shot.vz*dt/steps};
       if(!isPathClear(shot,next,shot.radius,space)) {
@@ -217,8 +261,7 @@ function advanceProjectiles(s: GameData,dt: number,obstacles: Obstacle[]) {
       }
       const previous={x:shot.x,z:shot.z};shot.x=next.x;shot.z=next.z;
       if(shot.reflected&&distance(shot,owner)<=shot.radius+owner.radius) {
-        owner.hp=Math.max(0,owner.hp-1);owner.flash=.15;owner.hitstun=.1;owner.repathTime=0;
-        owner.vx=shot.vx*.5;owner.vz=shot.vz*.5;shot.life=0;
+        damageEnemy(owner,1,shot.vx*.5,shot.vz*.5,.1);shot.life=0;
         burst(s,shot,'spark','#baf5ce',9);sound(s,'ranged-impact');s.shake=Math.max(s.shake,.07);
         if(owner.hp===0)defeatEnemy(s,owner);
       } else if(!shot.reflected&&distance(shot,s.player)<=shot.radius+PLAYER_RADIUS) {
@@ -241,10 +284,10 @@ function attackTargets(s: GameData) {
   for(const e of s.enemies) {
     if(e.zone!==s.zone||e.hp<=0||e.lastAttackId===p.attackId||!swingHits(s,e,e.radius))continue;
     if(e.kind==='boss'&&(!s.gateOpen||p.z<15.1))continue;
-    e.lastAttackId=p.attackId;e.hp--;e.flash=.15;e.hitstun=e.kind==='boss'?(e.mode==='charge'?.055:.1):.25;e.repathTime=0;
+    const d=distance(e,p)||1,recoil=e.kind==='boss'?3.7:7;
+    if(!damageEnemy(e,1,(e.x-p.x)/d*recoil,(e.z-p.z)/d*recoil,e.kind==='boss'?.1:.25))continue;
+    e.lastAttackId=p.attackId;
     if(e.kind==='blob')resumePursuit(e);
-    const d=distance(e,p)||1,recoil=e.kind==='boss'?(e.mode==='charge'?1.8:3.7):7;
-    e.vx=(e.x-p.x)/d*recoil;e.vz=(e.z-p.z)/d*recoil;
     // A hit briefly interrupts the Guardian's movement, but does not reset its
     // telegraph. Repeated swings therefore cannot keep it permanently stunned.
     burst(s,{x:(e.x+p.x)/2,z:(e.z+p.z)/2},'spark','#fff4c1',7);sound(s,'hit');s.shake=Math.max(s.shake,.07);
@@ -263,7 +306,7 @@ function attackTargets(s: GameData) {
   if(broken)s.breakables=broken;
 }
 function transition(s: GameData,zone: Zone,point: Point,portal: NavigationPortal) {
-  s.zone=zone;Object.assign(s.player,point,{vx:0,vz:0,knockX:0,knockZ:0,invulnerable:1.4,attackTime:0});s.particles=[];s.projectiles=[];s.shake=0;s.damageFlash=0;
+  s.zone=zone;Object.assign(s.player,point,{vx:0,vz:0,knockX:0,knockZ:0,invulnerable:1.4,attackTime:0});s.particles=[];s.projectiles=[];s.hazards=[];s.shake=0;s.damageFlash=0;
   for(const e of s.enemies) {
     clearPath(e);resetProgress(e);
     if(portal.traversableByAI&&e.kind==='blob'&&e.aggro) {e.mode='chase';e.vx=0;e.vz=0;continue;}
@@ -274,14 +317,14 @@ function transition(s: GameData,zone: Zone,point: Point,portal: NavigationPortal
   sound(s,'enter');message(s,zone==='dungeon'?'A little courage. A little light. Find the old brass key.':'Fresh air. The pines welcome you home.',4.5);
 }
 function quest(s: GameData,input: InputState,nav: NavigationRuntime) {
-  // Player and AI use the same directed portal records. The short arrival grace
-  // avoids immediately taking the return link while the action key is held.
-  if(input.interact) for(const portal of NAVIGATION_PORTALS) {
+  // Walking into either doorway takes its directed link. Both landing points
+  // sit outside the reverse trigger, so standing still or continuing forward
+  // never bounces the hero back; turning around can use the door immediately.
+  for(const portal of NAVIGATION_PORTALS) {
     const network=nav.networks.blob;
     const from=portalEndpoint(network,portal.fromChunk,portal.fromTile);
     const to=portalEndpoint(network,portal.toChunk,portal.toTile);
     if(!from||!to||from.zone!==s.zone||distance(s.player,from)>=(portal.interactionRadius??1.5))continue;
-    if(s.zone==='dungeon'&&s.player.invulnerable>=1.2)continue;
     const world=WORLDS[to.zone];
     if(!isPathClear(to,to,PLAYER_RADIUS,{width:world.width,height:world.height,obstacles:solidObstacles(s,to.zone)}))continue;
     transition(s,to.zone,to,portal);nav.jobs.clear();return;
@@ -308,7 +351,9 @@ export function stepGame(previous: GameData,dt: number,input: InputState): GameD
   // Moving entities are mutable within a tick. Routes, scenery, sound history
   // and visited areas use copy-on-write at their mutation sites instead of
   // allocating their unchanged contents sixty times per second.
-  const s: GameData={...previous,player:{...previous.player},enemies:previous.enemies.map(e=>({...e})),pickups:previous.pickups.map(p=>({...p})),particles:previous.particles.map(p=>({...p})),projectiles:previous.projectiles.map(shot=>({...shot}))};
+  // A live development session may predate hazards; upgrade it without resetting
+  // progress or throwing out of the animation loop during an attack warning.
+  const s: GameData={...previous,player:{...previous.player},enemies:previous.enemies.map(e=>({...e})),pickups:previous.pickups.map(p=>({...p})),particles:previous.particles.map(p=>({...p})),projectiles:previous.projectiles.map(shot=>({...shot})),hazards:(previous.hazards??[]).map(hazard=>({...hazard}))};
   const p=s.player;let obs=solidObstacles(s,s.zone);s.elapsed+=dt;s.shake=Math.max(0,s.shake-dt);s.damageFlash=Math.max(0,s.damageFlash-dt);s.messageTime=Math.max(0,s.messageTime-dt);
   p.invulnerable=Math.max(0,p.invulnerable-dt);p.attackTime=Math.max(0,p.attackTime-dt);p.attackCooldown=Math.max(0,p.attackCooldown-dt);
   const inputLength=Math.hypot(input.x,input.z),ix=inputLength>1?input.x/inputLength:input.x,iz=inputLength>1?input.z/inputLength:input.z;
@@ -350,26 +395,35 @@ export function stepGame(previous: GameData,dt: number,input: InputState): GameD
         }
       }
     }
-    if(e.hitstun<=0) {
+    const committedCharge=e.kind==='boss'&&(e.mode==='charge'||(e.mode==='windup'&&e.modeTime<=1e-8));
+    if(e.hitstun<=0||committedCharge) {
       if(e.kind==='boss') {
         if(e.mode==='ranged-windup') {
           e.vx=0;e.vz=0;
           if(e.modeTime<=1e-8)fireGuardianWisp(s,e);
         } else if(e.mode==='windup') {
           e.vx*=Math.exp(-18*dt);e.vz*=Math.exp(-18*dt);
-          if(e.modeTime<=0) {e.mode='charge';e.modeTime=.56;e.wanderAngle=Math.atan2(p.z-e.z,p.x-e.x);e.vx=Math.cos(e.wanderAngle)*7.2;e.vz=Math.sin(e.wanderAngle)*7.2;}
+          if(e.modeTime<=1e-8) {
+            e.mode='charge';e.modeTime=BOSS_CHARGE_DURATION;e.hitstun=0;e.flash=0;
+            e.chargeStartX=e.x;e.chargeStartZ=e.z;
+            e.vx=Math.cos(e.wanderAngle)*BOSS_CHARGE_SPEED;e.vz=Math.sin(e.wanderAngle)*BOSS_CHARGE_SPEED;
+            sound(s,'boss-lunge');
+          }
         } else if(e.mode==='charge') {
-          if(e.modeTime<=0){e.mode='idle';e.modeTime=.5;}
+          e.hitstun=0;
+          if(e.modeTime<=1e-8){e.mode='idle';e.modeTime=BOSS_RECOVERY;e.vx=0;e.vz=0;}
           else {
-            // Recover the committed rush after a hit's brief recoil. Otherwise
-            // holding the sword reverses every charge and removes all danger.
-            const recover=1-Math.exp(-18*dt);
-            e.vx+=(Math.cos(e.wanderAngle)*7.2-e.vx)*recover;
-            e.vz+=(Math.sin(e.wanderAngle)*7.2-e.vz)*recover;
+            e.vx=Math.cos(e.wanderAngle)*BOSS_CHARGE_SPEED;
+            e.vz=Math.sin(e.wanderAngle)*BOSS_CHARGE_SPEED;
           }
         }
         else if(e.mode==='idle'&&e.modeTime>0){e.vx*=Math.exp(-9*dt);e.vz*=Math.exp(-9*dt);}
-        else if(d<5.6&&isPathClear(e,p,e.radius,navigation)){e.mode='windup';e.modeTime=.65;e.vx=0;e.vz=0;}
+        else if((d>=BOSS_RANGED_DISTANCE||e.stuckTime+1e-8>=.5)&&e.rangedCooldown<=0)beginRanged(s,e);
+        else if(d<5.6&&isPathClear(e,p,e.radius,navigation)){
+          e.mode='windup';e.modeTime=BOSS_MELEE_WINDUP;e.vx=0;e.vz=0;
+          e.wanderAngle=Math.atan2(p.z-e.z,p.x-e.x);e.chargeStartX=e.x;e.chargeStartZ=e.z;
+          clearPath(e);resetProgress(e);sound(s,'boss-windup');
+        }
         else followPath(e,p,s.zone,2.65,dt,nav);
       } else if(e.aggro) {
         if(inSanctuary&&e.zone===s.zone)watchSanctuary(e,dt,nav);
@@ -415,7 +469,8 @@ export function stepGame(previous: GameData,dt: number,input: InputState): GameD
       if(e.kind==='boss')rangedFallback(s,e,dt);
       else recordPursuitProgress(e,p,s.zone==='overworld'&&distance(p,SANCTUARY)<SANCTUARY.radius,dt);
     }
-    advanceProjectiles(s,dt,obs);
+    advanceHazards(s,dt);
+    if(s.phase==='playing')advanceProjectiles(s,dt,obs);
   }
   for(const pickup of s.pickups) {
     pickup.age+=dt;if(pickup.zone!==s.zone||pickup.age<.14)continue;

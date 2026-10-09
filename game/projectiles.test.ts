@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createInitialData, FIXED_DT, stepGame } from './simulation';
+import { BOSS_RANGED_COOLDOWN, BOSS_RANGED_WINDUP } from './boss-attacks';
 import type { GameData, InputState, Projectile } from './types';
 
 const idle:InputState={x:0,z:0,attack:false,interact:false};
@@ -35,10 +36,12 @@ test('a stalled pursuit warns for 0.8 seconds before firing, then respects its c
   s=frames(s,47);assert.equal(s.projectiles.length,0,'The entire warning is safe');
   s=frames(s,1);assert.equal(s.projectiles.length,1);
   const first=s.projectiles[0];
-  assert.ok(Math.abs(Math.hypot(first.vx,first.vz)-7.2)<1e-9);
+  assert.ok(first.lob);
+  assert.equal(first.lob.targetX,10);assert.equal(first.lob.targetZ,24.5);
+  assert.ok(Math.abs(first.vz-(first.lob.targetZ-first.lob.startZ)/first.lob.duration)<1e-9);
   assert.ok(first.vz>0&&Math.abs(first.vx)<1e-9);
-  s=frames(s,179);assert.equal(s.sounds.filter(e=>e.name==='ranged-fire').length,1);
-  s=frames(s,50);assert.equal(s.sounds.filter(e=>e.name==='ranged-fire').length,2);
+  s=frames(s,Math.ceil(BOSS_RANGED_COOLDOWN/FIXED_DT)-1);assert.equal(s.sounds.filter(e=>e.name==='ranged-fire').length,1);
+  s=frames(s,Math.ceil(BOSS_RANGED_WINDUP/FIXED_DT)+2);assert.equal(s.sounds.filter(e=>e.name==='ranged-fire').length,2);
 });
 
 test('the warning locks its aim so sidestepping before release dodges the shot',()=>{
@@ -52,6 +55,7 @@ test('the warning locks its aim so sidestepping before release dodges the shot',
 
 test('moving pursuits, intentional windups, recovery, hitstun, and inactive fights never count as stuck',()=>{
   let moving=arena();moving.player.invulnerable=100;moving.enemies[0].z=17;moving.enemies[0].progressZ=17;
+  moving.enemies[0].rangedCooldown=100; // Isolate stall detection from the deliberate long-range attack.
   moving=frames(moving,120);assert.equal(moving.sounds.filter(e=>e.name==='ranged-fire').length,0);
   for(const mode of ['windup','idle'] as const) {
     let s=trapBoss(arena());s.enemies[0].mode=mode;s.enemies[0].modeTime=2;s.enemies[0].stuckTime=.49;

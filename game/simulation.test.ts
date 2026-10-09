@@ -118,8 +118,8 @@ function findRoute(s:GameData,target:Point):Point[] {
   }
   assert.fail(`No walkable route in ${s.zone} to ${target.x}, ${target.z}`);
 }
-function navigate(s:GameData,target:Point):GameData {
-  const route=findRoute(s,target),obs=routeObstacles(s);
+function navigate(s:GameData,target:Point,destination?:GameData['zone']):GameData {
+  const route=findRoute(s,target),obs=routeObstacles(s),startZone=s.zone;
   for(const waypoint of route) {
     let reached=false;
     for(let i=0;i<900;i++) {
@@ -127,6 +127,7 @@ function navigate(s:GameData,target:Point):GameData {
       if(d<.095){reached=true;break;}
       const strength=Math.min(1,d*1.6);
       s=stepGame(s,FIXED_DT,{...idle,x:dx/d*strength,z:dz/d*strength});
+      if(s.zone!==startZone){assert.equal(s.zone,destination,'Only the requested doorway changes zones');return s;}
       assert.ok(!obs.some(o=>overlapsSolid(s.player,PLAYER_RADIUS-.003,o)),`Hero entered solid geometry near ${s.player.x}, ${s.player.z}`);
     }
     assert.ok(reached,`Movement could not reach ${waypoint.x}, ${waypoint.z}`);
@@ -138,7 +139,7 @@ test('the complete landscape is navigable with real movement through bridge, doo
   let s=playing();s.enemies=[];
   s=navigate(s,{x:22,z:13});s=navigate(s,{x:27.5,z:13});
   assert.ok(s.player.x>26.3&&s.player.z>11.4&&s.player.z<14.9,'Cross the river on its bridge');
-  s=navigate(s,WORLDS.overworld.entrance);s=stepGame(s,FIXED_DT,{...idle,interact:true});assert.equal(s.zone,'dungeon');
+  s=navigate(s,WORLDS.overworld.entrance,'dungeon');assert.equal(s.zone,'dungeon');
   s=navigate(s,WORLDS.dungeon.key);assert.equal(s.hasKey,true);
   s=navigate(s,{x:10,z:12});assert.equal(s.gateOpen,true);
   s=navigate(s,WORLDS.dungeon.chest);assert.ok(s.player.z>24.7);

@@ -47,7 +47,7 @@ export default function QuestJournal() {
           <span>{step.label}{step.done && <span className="sr-only"> — complete</span>}</span>
         </li>)}
       </ol>
-      <p className="quest-tip">{gateOpen && !bossDefeated ? 'Violet glow? Sidestep the wisp, or swing your sword to send it back.' : 'Follow the gold map marker. Cut grass and break pots to find hearts and rupees.'}</p>
+      <p className="quest-tip">{gateOpen && !bossDefeated ? 'Dodge amber lanes, then strike. Move out of violet circles before the wisp lands.' : 'Follow the gold map marker. Cut grass and break pots to find hearts and rupees.'}</p>
     </div>}
   </aside>;
 }

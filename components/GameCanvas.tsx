@@ -2,6 +2,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useGameStore } from '@/game/store';
 import { GameAudio } from '@/game/audio';
+import { musicForState } from '@/game/music-state';
 import { createInput } from '@/game/input';
 import { createFrameStats } from '@/game/frame-stats';
 
@@ -30,6 +31,12 @@ export default function GameCanvas({ onReady }: { onReady: (controls: GameContro
       if (disposed || !canvas.current) return;
       const renderer = createGameRenderer(canvas.current);
       const audio = new GameAudio();
+      const syncAudio = (current = useGameStore.getState()) => {
+        audio.setMuted(current.muted);
+        audio.setMusic(document.hidden ? null : musicForState(current));
+      };
+      syncAudio();
+      const unsubscribeAudio = useGameStore.subscribe(syncAudio);
       let soundId = 0;
       let modalOpen = false;
       const start = () => { audio.unlock(); input.clear(); canvas.current?.focus({ preventScroll: true }); soundId = 0; useGameStore.getState().start(); };
@@ -59,7 +66,6 @@ export default function GameCanvas({ onReady }: { onReady: (controls: GameContro
           accumulator -= 1 / 60;
         }
         const current = useGameStore.getState();
-        audio.setMuted(current.muted);
         current.sounds.forEach(event => { if (event.id > soundId) { audio.play(event.name); soundId = event.id; } });
         renderer.render(current, dt);
         const sample = stats.record(now, renderer.drawCalls(), renderer.activeMeshes());
@@ -72,17 +78,23 @@ export default function GameCanvas({ onReady }: { onReady: (controls: GameContro
         frame = requestAnimationFrame(loop);
       };
       if (!document.hidden) frame = requestAnimationFrame(loop);
+      const pauseWhenUnfocused = () => {
+        input.clear();
+        if (useGameStore.getState().phase === 'playing') useGameStore.getState().togglePause();
+      };
       const visibility = () => {
         if (document.hidden) {
           cancelAnimationFrame(frame);
-          input.clear();
-          if (useGameStore.getState().phase === 'playing') useGameStore.getState().togglePause();
+          pauseWhenUnfocused();
         } else {
           cancelAnimationFrame(frame);
           last = performance.now(); accumulator = 0; stats.reset(last);
           frame = requestAnimationFrame(loop);
         }
+        syncAudio();
       };
+      // Switching to another app can blur a still-visible browser window.
+      window.addEventListener('blur', pauseWhenUnfocused);
       document.addEventListener('visibilitychange', visibility);
       void renderer.ready().then(() => {
         if (!disposed) onReady({
@@ -101,7 +113,7 @@ export default function GameCanvas({ onReady }: { onReady: (controls: GameContro
         });
       });
       const element = canvas.current;
-      cleanup = () => { cancelAnimationFrame(frame); resize.disconnect(); input.dispose(); audio.dispose(); renderer.dispose(); document.removeEventListener('visibilitychange', visibility); element.removeEventListener('pointerdown', unlockAudio); };
+      cleanup = () => { cancelAnimationFrame(frame); resize.disconnect(); unsubscribeAudio(); input.dispose(); audio.dispose(); renderer.dispose(); window.removeEventListener('blur', pauseWhenUnfocused); document.removeEventListener('visibilitychange', visibility); element.removeEventListener('pointerdown', unlockAudio); };
     }).catch((cause: unknown) => {
       if (!disposed) setError(cause instanceof Error ? cause.message : 'Your browser could not start WebGL.');
     });

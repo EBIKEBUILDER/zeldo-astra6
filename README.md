@@ -15,6 +15,8 @@ npm run dev
 
 Open [localhost:3000](http://localhost:3000). The game needs a browser with WebGL enabled; sound starts after a user gesture.
 
+An original synthesized soundtrack follows the adventure: a bright valley melody in the overworld, spacious bells and minor chords in the dungeon, and a driving battle theme inside the Guardian's arena. Tracks loop and crossfade automatically. Music fades out when paused, in menus, on ending screens, or when the tab is hidden; resuming starts the current theme again. **M** or the sound button mutes both music and effects.
+
 ```sh
 npm run build   # Production build
 npm start       # Serve the production build
@@ -29,11 +31,12 @@ npm test        # Deterministic simulation tests
 | Start / retry | Enter or the on-screen button |
 | Move | WASD or arrow keys |
 | Swing sword | Space or hold the pointer on the world |
-| Enter / leave shrine, open chest | E |
+| Enter / leave shrine | Walk through the entrance / exit |
+| Inspect / open chest | E |
 | Pause / resume | Escape or the pause button |
 | Mute / unmute | M or the sound button |
 
-On phones and tablets, drag the left joystick to move; a small tilt walks slowly. Hold the large **Sword** button with your other thumb to attack while moving. The nearby action button becomes **Enter**, **Leave**, **Inspect**, or **Open** when something is in reach. Sword swings follow your facing direction. Releasing a control, rotating the device, opening a menu, or switching apps safely clears held input.
+On phones and tablets, drag the left joystick to move; a small tilt walks slowly. Hold the large **Sword** button with your other thumb to attack while moving. Walk through the shrine entrance or down the dungeon exit steps to travel automatically. The nearby action button becomes **Inspect** or **Open** when something is in reach. Sword swings follow your facing direction. Releasing a control, rotating the device, opening a menu, or switching apps safely clears held input.
 
 Use **Fullscreen** in the header to give the game the whole screen. The exit button stays beside Pause. On browsers without native fullscreen support, this still hides the site header and footer.
 
@@ -42,21 +45,21 @@ The field HUD shows your hearts, rupees, current quest, a live minimap with faci
 ## The adventure
 
 1. Leave the safe home clearing and follow the pale path east, then north toward the wooden bridge.
-2. Cross the river and follow the path northeast to the stone shrine. Press **E** near the entrance.
+2. Cross the river and follow the path northeast to the stone shrine. Walk into the entrance to enter; walk down the dungeon's southern steps to leave.
 3. Find the brass key on the western pedestal in the first room. Walk into it to collect it and recover a heart.
 4. Approach the northern gate with the key to break its seal.
-5. Defeat the Hollow Guardian. Watch its windup, step away from its charge, then move in and swing. If its approach is blocked, a violet warning marks a locked shot: sidestep the line, or swing into the incoming wisp to send it back. Returned wisps hurt the Guardian; stone blocks them in either direction.
+5. Defeat the Hollow Guardian. An amber lane shows its committed lunge: step aside, then strike during recovery. The boss is immune to damage and knockback throughout the lunge. At range or when it cannot reach you, it marks a violet landing circle and lobs a wisp over cover. Move clear before it lands; the explosion leaves a brief damaging pool. A timed sword swing can return a low wisp before impact. Returned wisps hurt the Guardian outside its lunge and still stop at stone.
 6. Press **E** beside the unlocked northern chest to recover the ember and finish. Your time and rupee total appear on the victory screen.
 
 Monsters use obstacle-aware routes and keep chasing once alerted, even through long detours. Only twenty seconds without movement ends a stalled chase; they then turn and walk home. The home clearing remains safe, and staying there for eighteen seconds lets pursuers lose interest.
 
-Cut grass and break pots for rupees and healing hearts. Ordinary monsters return after roughly 20 seconds; the guardian stays defeated. Losing all three hearts opens the retry screen. Leaving the browser tab automatically pauses the game.
+Cut grass and break pots for rupees and healing hearts. Ordinary monsters return after roughly 20 seconds; the guardian stays defeated. Losing all three hearts opens the retry screen. Switching tabs or moving focus to another window automatically pauses the game and its music. Return and choose **Continue adventure** to resume from the same place.
 
 ## Architecture
 
 - `game/types.ts` defines serializable world and game data.
 - `game/world.ts` lays out the overworld, dungeon, obstacles, and decorative details.
-- `game/simulation.ts` owns movement, collision and separation, combat, enemies, pickups, particles, quest progression, and seeded randomness.
+- `game/simulation.ts` owns movement, collision and separation, combat, enemies, pickups, particles, quest progression, and seeded randomness. `game/boss-attacks.ts` shares boss attack timings, ranges, and projectile arc calculations with the renderer.
 - `game/pathfinding.ts` finds routes with resumable eight-way A*, shared walkability caches, and a corner-based fallback for narrow gaps.
 - `game/navigation-network.ts` connects shared zone grids with directed, costed portal edges.
 - `game/navigation-runtime.ts` rebuilds changed navigation geometry and schedules all enemy searches within one per-tick work budget.
@@ -70,6 +73,7 @@ Cut grass and break pots for rupees and healing hearts. Ordinary monsters return
 - `components/TouchControls.tsx` owns separate movement/attack pointers for two-thumb play.
 - `components/AdventureMap.tsx` and `components/QuestJournal.tsx` show the live map, objective markers, and quest milestones.
 - `game/audio.ts` synthesizes every sound with oscillators, noise, filters, and envelopes. Audio nodes are cleaned up after use.
+- `game/music.ts` contains three original looping scores. `game/music-player.ts` schedules their synthesized instruments against the audio clock, and `game/music-state.ts` selects the theme from gameplay state.
 - `components/GameCanvas.tsx` runs the simulation at a fixed 60 Hz and renders independently with `requestAnimationFrame`.
 - `components/Adventure.tsx` contains the React HUD, map, quest hints, help, title, pause, and ending screens.
 - `game/simulation.test.ts` checks core game rules and the quest route without a renderer.
@@ -99,6 +103,8 @@ node scripts/render-benchmark.cjs --source /path/to/baseline/game --output test-
 node scripts/render-benchmark.cjs --compare test-artifacts/render-baseline --output test-artifacts/render-current
 # With the game running locally, check performance stats, pause/resume and twelve responsive layouts:
 node scripts/fps-ui-smoke.cjs http://127.0.0.1:3000
+# Verify switching windows/tabs pauses without resetting adventure progress:
+node scripts/focus-ui-smoke.cjs http://127.0.0.1:3000
 ```
 
 At 1280×720, the deterministic comparison measured these draw calls per frame, including shadows:

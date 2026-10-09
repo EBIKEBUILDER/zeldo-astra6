@@ -3,6 +3,8 @@ import type { GameData, Zone, Obstacle, Decoration } from './types';
 import { WORLDS } from './world';
 import { getCameraFraming, getGameplayCameraTarget } from './camera';
 import { mergeOpaqueMeshes } from './render-batching';
+import { BOSS_CHARGE_DISTANCE, BOSS_HAZARD_RADIUS, BOSS_MELEE_WINDUP, BOSS_RANGED_WINDUP, bossLobHeight, bossLobVerticalSpeed } from './boss-attacks';
+import { PLAYER_RADIUS } from './simulation';
 
 /** Babylon is deliberately a projection of the serializable simulation. */
 export function createGameRenderer(canvas: HTMLCanvasElement) {
@@ -279,6 +281,9 @@ export function createGameRenderer(canvas: HTMLCanvasElement) {
     if (!dungeon) {
       const node = group('elder-stone-entrance', data.entrance.x, data.entrance.z, root);
       for (let s = 0; s < 3; s++) box('temple-step', 3.1 - s * .12, .12, .67, 0, .05 + s * .1, -1.9 + s * .6, C.stoneLight, node);
+      // Cover the pale path under the doorway so the recess reads as dark stone,
+      // rather than a bright pool of light between the steps and back panel.
+      box('shrine-threshold', 2.15, .1, 1.15, 0, .25, -.03, '#435047', node, false);
       box('door-darkness', 2.15, 2.85, .3, 0, 1.42, .48, '#314944', node);
       for (const x of [-1.5, 1.5]) {
         box('arch-foot', .92, .3, 1.35, x, .15, .1, C.stoneDark, node);
@@ -288,7 +293,7 @@ export function createGameRenderer(canvas: HTMLCanvasElement) {
       }
       box('arch-lintel', 3.92, .8, 1.45, 0, 3.03, .08, C.stone, node);
       box('arch-cap', 3.25, .35, 1.37, .1, 3.58, .14, C.stoneLight, node).rotation.z = -.03;
-      diamond('sun-rune', 0, 3.05, -.68, C.gold, node, .23, .2);
+      diamond('sun-rune', 0, 3.05, -.68, C.gold, node, .23);
       grass(-1.9, .45, 0, node, C.pineLight, 1.5);
       grass(1.9, -.2, 1, node, C.pineLight, 1.4);
       // A few stepping stones around the cottage make the safe clearing feel lived in.
@@ -398,14 +403,89 @@ export function createGameRenderer(canvas: HTMLCanvasElement) {
   const treasureGlow = cylinder('treasure-glow', 1.7, .9, 1.8, 0, 1.58, 0, '#ffdf80', chest, 8, false);
   treasureGlow.material = mat('#ffe3a0', .8, .17); treasureGlow.setEnabled(false);
 
-  type RangedCue = { node: B.TransformNode; halo: B.Mesh; orb: B.Mesh; runes: B.Mesh[]; aim: B.Mesh; target: B.Mesh };
-  const enemyNodes = new Map<string, { node: B.TransformNode; body: B.Mesh; eyes: B.Mesh[]; danger: B.Mesh | null; ranged: RangedCue | null; originals: Map<B.AbstractMesh, B.Material | null>; flashing: boolean }>();
+  type GroundTarget = { node: B.TransformNode; fill: B.Mesh; edge: B.Mesh; progress: B.Mesh };
+  type ChargeCue = { node: B.TransformNode; fill: B.Mesh; edge: B.Mesh; arrow: B.Mesh };
+  type RangedCue = { node: B.TransformNode; halo: B.Mesh; orb: B.Mesh; runes: B.Mesh[]; aim: B.Mesh; target: GroundTarget };
+  const enemyNodes = new Map<string, { node: B.TransformNode; body: B.Mesh; eyes: B.Mesh[]; charge: ChargeCue | null; ranged: RangedCue | null; originals: Map<B.AbstractMesh, B.Material | null>; flashing: boolean }>();
   const breakableNodes = new Map<string, B.TransformNode>();
   const pickupNodes = new Map<string, B.TransformNode>();
-  const projectileNodes = new Map<number, { node: B.TransformNode; core: B.Mesh; halo: B.Mesh; tails: B.Mesh[] }>();
+  const projectileNodes = new Map<number, { node: B.TransformNode; core: B.Mesh; halo: B.Mesh; tails: B.Mesh[]; target: GroundTarget; shadow: B.Mesh }>();
+  const hazardNodes = new Map<number, { node: B.TransformNode; pool: B.Mesh; edge: B.Mesh; impact: B.Mesh; embers: B.Mesh[] }>();
   const particleNodes = new Map<number, B.Mesh>();
   const particlePool: Record<'poof' | 'box', B.Mesh[]> = { poof: [], box: [] };
-  const livePickupIds = new Set<string>(), liveProjectileIds = new Set<number>(), liveParticleIds = new Set<number>();
+  const livePickupIds = new Set<string>(), liveEnemyIds = new Set<string>(), liveProjectileIds = new Set<number>(), liveHazardIds = new Set<number>(), liveParticleIds = new Set<number>();
+  function cueMaterial(color: string, alpha: number, boundary = false): B.StandardMaterial {
+    const key = `cue:${color}:${alpha}:${boundary}`;
+    let material = materials.get(key);
+    if (!material) {
+      material = new B.StandardMaterial(key, scene);
+      material.disableLighting = true;
+      material.emissiveColor = B.Color3.FromHexString(color);
+      material.diffuseColor = material.specularColor = B.Color3.Black();
+      material.backFaceCulling = false; material.alpha = alpha;
+      // Decorative lintels must not hide the danger boundary in the angled view.
+      // Only outlines overlay scenery; filled areas still sit beneath actors.
+      if (boundary) { material.depthFunction = B.Constants.ALWAYS; material.disableDepthWrite = true; }
+      materials.set(key, material);
+    }
+    return material;
+  }
+  function groundEffect(mesh: B.Mesh, color: string, alpha: number, boundary = false): B.Mesh {
+    mesh.material = cueMaterial(color, alpha, boundary);
+    mesh.receiveShadows = false;
+    mesh.alphaIndex = boundary ? 1 : 0;
+    return mesh;
+  }
+  function disc(name: string, radius: number, y: number, color: string, alpha: number, parent?: B.Node): B.Mesh {
+    const mesh = finish(B.MeshBuilder.CreateDisc(`${name}-${serial++}`, { radius, tessellation: 48 }, scene), color, parent, false);
+    mesh.rotation.x = Math.PI / 2; mesh.position.y = y;
+    return groundEffect(mesh, color, alpha);
+  }
+  function groundPolygon(name: string, points: number[][], y: number, color: string, alpha: number, parent: B.Node): B.Mesh {
+    const mesh = new B.Mesh(`${name}-${serial++}`, scene);
+    const centerX = points.reduce((sum, point) => sum + point[0], 0) / points.length;
+    const centerZ = points.reduce((sum, point) => sum + point[1], 0) / points.length;
+    const positions = [centerX, y, centerZ], normals = [0, 1, 0], indices: number[] = [];
+    points.forEach(([x, z], i) => { positions.push(x, y, z); normals.push(0, 1, 0); indices.push(0, i + 1, (i + 1) % points.length + 1); });
+    const data = new B.VertexData(); data.positions = positions; data.normals = normals; data.indices = indices; data.applyToMesh(mesh);
+    finish(mesh, color, parent, false);
+    return groundEffect(mesh, color, alpha);
+  }
+  function groundTarget(): GroundTarget {
+    // The outer edge is the real impact radius; only the inner progress ring moves.
+    const node = group('guardian-landing-warning');
+    const fill = disc('landing-fill', 1, .074, '#ac6ae5', .34, node);
+    const edge = groundEffect(ring('landing-boundary', 1, .055, 0, .08, 0, '#d6b5ff', node), '#d6b5ff', .9, true);
+    const progress = groundEffect(ring('landing-countdown', 1, .038, 0, .088, 0, '#b68cfa', node), '#b68cfa', .55);
+    node.setEnabled(false);
+    return { node, fill, edge, progress };
+  }
+  function cueElevation(x: number, z: number, radius: number, endX = x, endZ = z): number {
+    // The chest dais is the arena's only raised walkable prop. Lift nearby
+    // markings above it without making every floor effect float above the room.
+    const chest = WORLDS.dungeon.chest;
+    const dx = endX - x, dz = endZ - z, lengthSquared = dx * dx + dz * dz;
+    const along = lengthSquared ? Math.max(0, Math.min(1, ((chest.x - x) * dx + (chest.z - z) * dz) / lengthSquared)) : 0;
+    return Math.hypot(chest.x - x - dx * along, chest.z - z - dz * along) < 1.45 + radius ? .205 : 0;
+  }
+  function updateTarget(target: GroundTarget, x: number, z: number, radius: number, progress: number): void {
+    target.node.position.set(x, cueElevation(x, z, radius), z); target.node.scaling.set(radius, 1, radius);
+    target.progress.scaling.setAll(Math.max(.04, 1 - progress));
+    target.fill.visibility = .9 + progress * .1;
+  }
+  function chargeCue(radius: number): ChargeCue {
+    const node = group('guardian-charge-lane');
+    const points: number[][] = [];
+    for (let i = 0; i <= 16; i++) { const angle = i / 16 * Math.PI; points.push([Math.cos(angle) * radius, BOSS_CHARGE_DISTANCE + Math.sin(angle) * radius]); }
+    for (let i = 0; i <= 16; i++) { const angle = Math.PI + i / 16 * Math.PI; points.push([Math.cos(angle) * radius, Math.sin(angle) * radius]); }
+    const fill = groundPolygon('charge-lane-fill', points, .074, '#e8a13e', .42, node);
+    const path = [...points, points[0]].map(([x, z]) => new B.Vector3(x, .087, z));
+    const edge = finish(B.MeshBuilder.CreateTube(`charge-lane-edge-${serial++}`, { path, radius: .035, tessellation: 4 }, scene), '#ffba64', node, false);
+    groundEffect(edge, '#ffba64', .95, true);
+    const arrow = groundPolygon('charge-direction', [[-radius * .65, BOSS_CHARGE_DISTANCE - .8], [0, BOSS_CHARGE_DISTANCE + .2], [radius * .65, BOSS_CHARGE_DISTANCE - .8]], .087, '#ffd493', .85, node);
+    node.setEnabled(false);
+    return { node, fill, edge, arrow };
+  }
   function recycleParticle(mesh: B.Mesh) {
     mesh.setEnabled(false);
     const pool = particlePool[mesh.metadata.particleShape as 'poof' | 'box'];
@@ -422,8 +502,31 @@ export function createGameRenderer(canvas: HTMLCanvasElement) {
       tail.visibility = .66 - i * .18;
       return tail;
     });
-    const model = { node, core, halo, tails };
+    node.getChildMeshes().forEach(mesh => { mesh.receiveShadows = false; });
+    const shadow = disc('lob-ground-shadow', .24, .07, '#442452', .35);
+    shadow.setEnabled(false);
+    const model = { node, core, halo, tails, target: groundTarget(), shadow };
     projectileNodes.set(id, model);
+    return model;
+  }
+  function hazardNode(id: number) {
+    const node = group('guardian-ember-pool');
+    const pool = disc('ember-pool-fill', 1, .078, '#9952c4', .45, node);
+    const splatter = Array.from({ length: 24 }, (_, index) => {
+      const angle = index * Math.PI * 2 / 24, radius = .72 + Math.sin(index * 2.4) * .2;
+      return [Math.cos(angle) * radius, Math.sin(angle) * radius];
+    });
+    groundPolygon('ember-pool-splatter', splatter, .085, '#aa55d9', .72, node);
+    const edge = groundEffect(ring('ember-pool-boundary', 1, .055, 0, .09, 0, '#cba0ff', node), '#cba0ff', .9, true);
+    const impact = groundEffect(ring('ember-impact-wave', 1, .11, 0, .12, 0, '#eedcff', node), '#eedcff', .9);
+    const embers = Array.from({ length: 5 }, (_, index) => {
+      const angle = index * Math.PI * 2 / 5;
+      const ember = diamond('pool-ember', Math.cos(angle) * .56, .13, Math.sin(angle) * .56, '#ce9cff', node, .055, .8);
+      ember.receiveShadows = false;
+      return ember;
+    });
+    const model = { node, pool, edge, impact, embers };
+    hazardNodes.set(id, model);
     return model;
   }
   function rangedCue(): RangedCue {
@@ -439,17 +542,15 @@ export function createGameRenderer(canvas: HTMLCanvasElement) {
     });
     const aim = box('locked-wisp-aim', .13, .025, 1, 0, .06, 0, '#b79af0', node, false);
     aim.material = mat('#b79af0', .75, .5);
-    const target = ring('locked-wisp-target', .44, .045, 0, .075, 0, '#d2bdff', node);
-    target.material = mat('#d2bdff', .8, .8);
+    const target = groundTarget();
     node.getChildMeshes().forEach(mesh => { mesh.receiveShadows = false; });
     node.setEnabled(false);
     return { node, halo, orb, runes, aim, target };
   }
-  function enemyNode(id: string, boss: boolean) {
+  function enemyNode(id: string, boss: boolean, radius: number) {
     const node = group(boss ? 'ember-guardian' : 'moss-slime');
+    // One smooth shell avoids a darker overlapping cap and its self-shadow.
     const body = ball('slime-body', boss ? 2.28 : 1.05, 0, boss ? .78 : .43, 0, boss ? '#ac704e' : '#889552', node, [1, .73, 1], true, 'smooth');
-    const browColor = boss ? '#694e3c' : '#657b42';
-    ball('slime-brow', boss ? 1.72 : .74, 0, boss ? 1.26 : .65, -.09, browColor, node, [1, .48, .86], true, 'smooth');
     const eyes: B.Mesh[] = [];
     for (const x of [-1, 1]) {
       eyes.push(ball('slime-eye', boss ? .24 : .14, x * (boss ? .36 : .17), boss ? .94 : .49, boss ? .99 : .46, '#f4e6ba', node, [.8, 1.1, .52], true, 'smooth'));
@@ -467,13 +568,12 @@ export function createGameRenderer(canvas: HTMLCanvasElement) {
       const sprout = cylinder('slime-sprout', .045, .075, .35, 0, .91, -.04, '#526c3e', node, 4, false); sprout.rotation.z = .25;
       ball('slime-leaf', .29, .12, 1.04, -.03, '#9aae65', node, [1.3, .23, .75], false, 'smooth').rotation.z = .35;
     }
-    const danger = boss ? ring('charge-warning', 1.55, .09, 0, .055, 0, '#e6a063', node) : null;
-    if (danger) { danger.material = mat('#efa567', .55, .7); danger.setEnabled(false); }
+    const charge = boss ? chargeCue(radius + PLAYER_RADIUS) : null;
     const ranged = boss ? rangedCue() : null;
-    mergeOpaqueMeshes(node, node.getChildMeshes().filter((mesh): mesh is B.Mesh => mesh instanceof B.Mesh && mesh !== body && mesh !== danger));
+    mergeOpaqueMeshes(node, node.getChildMeshes().filter((mesh): mesh is B.Mesh => mesh instanceof B.Mesh && mesh !== body));
     const originals = new Map<B.AbstractMesh, B.Material | null>(); node.getChildMeshes().forEach(mesh => originals.set(mesh, mesh.material));
-    const result = { node, body, eyes, danger, ranged, originals, flashing: false }; enemyNodes.set(id, result);
-    for (const mesh of node.getChildMeshes()) shadows.addShadowCaster(mesh);
+    const result = { node, body, eyes, charge, ranged, originals, flashing: false }; enemyNodes.set(id, result);
+    for (const mesh of node.getChildMeshes()) if (mesh.metadata?.castsShadow) shadows.addShadowCaster(mesh, false);
     return result;
   }
   function pot(parent: B.Node) {
@@ -558,22 +658,44 @@ export function createGameRenderer(canvas: HTMLCanvasElement) {
     swordPivot.scaling.setAll(attacking ? 1 : .67);
     arc.setEnabled(attacking); arc.visibility = attacking ? Math.min(1, p.attackTime * 12) : 0;
     if (state.phase === 'gameover') hero.rotation.z = .95; else hero.rotation.z = 0;
+    const combatVisible = (state.phase === 'playing' || state.phase === 'paused') && state.gateOpen && !state.bossDefeated && p.z >= 15.1;
+    liveEnemyIds.clear();
+    for (const enemy of state.enemies) liveEnemyIds.add(enemy.id);
+    enemyNodes.forEach((model, id) => {
+      if (liveEnemyIds.has(id)) return;
+      for (const mesh of model.node.getChildMeshes()) shadows.removeShadowCaster(mesh, false);
+      model.node.dispose(); model.charge?.node.dispose(); model.ranged?.node.dispose(); model.ranged?.target.node.dispose();
+      enemyNodes.delete(id);
+    });
     for (const enemy of state.enemies) {
-      const model = enemyNodes.get(enemy.id) ?? enemyNode(enemy.id, enemy.kind === 'boss');
+      const model = enemyNodes.get(enemy.id) ?? enemyNode(enemy.id, enemy.kind === 'boss', enemy.radius);
       const enabled = enemy.zone === activeZone && enemy.hp > 0;
       const rangedWindup = enemy.mode === 'ranged-windup';
-      model.ranged?.node.setEnabled(enabled && rangedWindup);
+      const charging = enemy.mode === 'charge';
+      const meleeWindup = enemy.mode === 'windup';
+      model.ranged?.node.setEnabled(enabled && combatVisible && rangedWindup);
+      model.ranged?.target.node.setEnabled(enabled && combatVisible && rangedWindup);
+      model.charge?.node.setEnabled(enabled && combatVisible && (meleeWindup || charging));
       model.node.setEnabled(enabled); if (!enabled) continue;
       model.node.position.set(enemy.x, Math.abs(Math.sin(time * (enemy.mode === 'chase' ? 10 : 3) + enemy.spawnX)) * .055, enemy.z);
       const angle = enemy.kind === 'blob' ? Math.atan2(enemy.facingX, enemy.facingZ)
         : rangedWindup ? Math.atan2(enemy.rangedAimX - enemy.x, enemy.rangedAimZ - enemy.z)
+        : meleeWindup || charging ? Math.atan2(Math.cos(enemy.wanderAngle), Math.sin(enemy.wanderAngle))
         : Math.atan2(p.x - enemy.x, p.z - enemy.z);
       model.node.rotation.y = angle;
       const bounce = Math.sin(time * (enemy.kind === 'boss' ? 7 : 5) + enemy.spawnX) * .035;
       model.body.scaling.y = (enemy.mode === 'windup' ? .57 : .73) + bounce;
-      if (model.danger) {
-        model.danger.setEnabled(enemy.mode === 'windup' || enemy.mode === 'charge');
-        model.danger.scaling.setAll(enemy.mode === 'windup' ? 1 + Math.sin(time * 17) * .12 : .9);
+      if (model.charge && (meleeWindup || charging)) {
+        const cue = model.charge;
+        const originX = charging ? enemy.chargeStartX ?? enemy.x : enemy.x, originZ = charging ? enemy.chargeStartZ ?? enemy.z : enemy.z;
+        const floor = cueElevation(originX, originZ, enemy.radius + PLAYER_RADIUS, originX + Math.cos(enemy.wanderAngle) * BOSS_CHARGE_DISTANCE, originZ + Math.sin(enemy.wanderAngle) * BOSS_CHARGE_DISTANCE);
+        cue.node.position.set(originX, floor, originZ);
+        cue.node.rotation.y = angle;
+        const progress = Math.max(0, Math.min(1, 1 - enemy.modeTime / BOSS_MELEE_WINDUP));
+        cue.fill.material = charging ? cueMaterial('#fa9b36', .55) : cueMaterial('#e8a13e', .42);
+        cue.edge.material = charging ? cueMaterial('#ffe0a4', .98, true) : cueMaterial('#ffba64', .95, true);
+        cue.fill.visibility = charging ? 1 : .85 + progress * .15;
+        cue.arrow.visibility = charging ? 1 : .65 + progress * .35;
       }
       model.node.scaling.setAll(enemy.mode === 'windup' ? 1 + Math.sin(time * 33) * .035 : 1);
       const flashing = enemy.flash > 0;
@@ -583,7 +705,7 @@ export function createGameRenderer(canvas: HTMLCanvasElement) {
       }
       if (model.ranged && rangedWindup) {
         const cue = model.ranged;
-        const progress = Math.max(0, Math.min(1, 1 - enemy.modeTime / .8));
+        const progress = Math.max(0, Math.min(1, 1 - enemy.modeTime / BOSS_RANGED_WINDUP));
         const aimDistance = Math.hypot(enemy.rangedAimX - enemy.x, enemy.rangedAimZ - enemy.z);
         cue.node.position.set(enemy.x, 0, enemy.z);
         cue.node.rotation.y = angle;
@@ -602,8 +724,7 @@ export function createGameRenderer(canvas: HTMLCanvasElement) {
         cue.aim.scaling.z = Math.max(.001, aimDistance - lineStart);
         cue.aim.position.z = (aimDistance + lineStart) / 2;
         cue.aim.visibility = .6 + progress * .4;
-        cue.target.position.z = aimDistance;
-        cue.target.scaling.setAll(1.25 - progress * .25);
+        updateTarget(cue.target, enemy.rangedAimX, enemy.rangedAimZ, BOSS_HAZARD_RADIUS, progress * .45);
       }
     }
     if (state.breakables !== lastBreakables || activeZone !== breakableZone) {
@@ -642,22 +763,52 @@ export function createGameRenderer(canvas: HTMLCanvasElement) {
     // their geometry immediately, including when the adventure is restarted.
     liveProjectileIds.clear();
     for (const item of state.projectiles) if (item.zone === activeZone) liveProjectileIds.add(item.id);
-    projectileNodes.forEach((model, id) => { if (!liveProjectileIds.has(id)) { model.node.dispose(); projectileNodes.delete(id); } });
+    projectileNodes.forEach((model, id) => { if (!liveProjectileIds.has(id)) { model.node.dispose(); model.target.node.dispose(); model.shadow.dispose(); projectileNodes.delete(id); } });
     for (const item of state.projectiles) {
       if (item.zone !== activeZone) continue;
       const model = projectileNodes.get(item.id) ?? projectileNode(item.id);
-      model.node.position.set(item.x, .72, item.z);
+      const progress = item.lob ? Math.max(0, Math.min(1, item.age / item.lob.duration)) : 0;
+      model.node.position.set(item.x, item.lob ? bossLobHeight(item.age, item.lob.duration) : .72, item.z);
       model.node.rotation.y = Math.atan2(item.vx, item.vz);
+      model.node.rotation.x = item.lob ? -Math.atan2(bossLobVerticalSpeed(item.age, item.lob.duration), Math.hypot(item.vx, item.vz)) : 0;
       model.node.scaling.setAll(item.radius / .18);
-      model.core.material = mat(item.reflected ? '#eaffce' : '#ccf4ff', .95);
+      model.target.node.setEnabled(Boolean(item.lob));
+      if (item.lob) updateTarget(model.target, item.lob.targetX, item.lob.targetZ, BOSS_HAZARD_RADIUS, .45 + progress * .55);
+      model.shadow.setEnabled(Boolean(item.lob));
+      model.shadow.position.set(item.x, .07 + cueElevation(item.x, item.z, .24), item.z);
+      model.shadow.scaling.setAll(.8 + (item.lob ? bossLobHeight(item.age, item.lob.duration) * .17 : 0));
+      model.core.material = mat(item.reflected ? '#eaffce' : item.lob ? '#ead5ff' : '#ccf4ff', .95);
+      model.core.scaling.setAll(item.lob ? 1.3 : 1);
       model.halo.material = mat(item.reflected ? '#eed18b' : '#aa89ed', .8, .8);
       model.core.rotation.set(item.age * 7, item.age * 5, item.age * 3);
       model.halo.scaling.setAll(1 + Math.sin(item.age * 18) * .09);
       model.tails.forEach((tail, i) => {
-        tail.material = mat(item.reflected ? '#a5e5bc' : '#8ec6ff', .7);
+        tail.material = mat(item.reflected ? '#a5e5bc' : item.lob ? '#c39bea' : '#8ec6ff', .7);
         tail.position.x = Math.sin(item.age * 16 - i * .9) * .045;
         tail.rotation.z = item.age * 5 + i;
         tail.scaling.z = 1.55 * Math.min(1, item.age / .12);
+      });
+    }
+    liveHazardIds.clear();
+    // A live store from before a development hot reload may lack this new field.
+    const hazards = state.hazards ?? [];
+    for (const hazard of hazards) if (hazard.zone === activeZone && hazard.life > 0) liveHazardIds.add(hazard.id);
+    hazardNodes.forEach((model, id) => { if (!liveHazardIds.has(id)) { model.node.dispose(); hazardNodes.delete(id); } });
+    for (const hazard of hazards) {
+      if (!liveHazardIds.has(hazard.id)) continue;
+      const model = hazardNodes.get(hazard.id) ?? hazardNode(hazard.id);
+      const age = hazard.maxLife - hazard.life;
+      model.node.position.set(hazard.x, cueElevation(hazard.x, hazard.z, hazard.radius), hazard.z);
+      model.node.scaling.set(hazard.radius, 1, hazard.radius);
+      // Pulse brightness, never the boundary: every visible pool has its true radius.
+      model.pool.visibility = .85 + Math.sin(age * 8) * .15;
+      model.edge.visibility = hazard.life < .4 ? .7 + Math.sin(hazard.life * 35) * .25 : 1;
+      model.impact.setEnabled(age < .32);
+      model.impact.scaling.setAll(.2 + Math.min(1, age / .32) * .8);
+      model.impact.visibility = Math.max(0, 1 - age / .32);
+      model.embers.forEach((ember, index) => {
+        ember.position.y = .1 + (Math.sin(age * 5 + index * 1.7) + 1) * .09;
+        ember.rotation.y = age * 2 + index;
       });
     }
     liveParticleIds.clear();

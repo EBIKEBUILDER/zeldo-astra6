@@ -60,8 +60,8 @@ for(const z of [4,10,17,24]) for(const x of [1.2,18.8]) dungeonDecorations.push(
 dungeonDecorations.push({kind:'banner',x:7.9,z:14.8},{kind:'banner',x:12.1,z:14.8});
 
 export const WORLDS: Record<Zone, WorldData> = {
-  overworld: { width:48,height:28,obstacles,decorations,spawn:{x:8,z:6},entrance:{x:42,z:24},exit:{x:42,z:22},key:{x:-100,z:-100},gate:{x:-100,z:-100},chest:{x:-100,z:-100} },
-  dungeon: { width:20,height:28,obstacles:dungeonObstacles,decorations:dungeonDecorations,spawn:{x:10,z:3},entrance:{x:10,z:2},exit:{x:10,z:2},key:{x:5,z:8},gate:{x:10,z:14},chest:{x:10,z:25} },
+  overworld: { width:48,height:28,obstacles,decorations,spawn:{x:8,z:6},entrance:{x:42,z:24},exit:{x:42,z:21.5},key:{x:-100,z:-100},gate:{x:-100,z:-100},chest:{x:-100,z:-100} },
+  dungeon: { width:20,height:28,obstacles:dungeonObstacles,decorations:dungeonDecorations,spawn:{x:10,z:4.5},entrance:{x:10,z:2},exit:{x:10,z:2},key:{x:5,z:8},gate:{x:10,z:14},chest:{x:10,z:25} },
 };
 
 // Chunks describe placement, never collision boundaries. All six overworld
@@ -78,12 +78,13 @@ export const NAVIGATION_CHUNKS: NavigationChunk[] = [
 
 // Directed links; tile indices are local half-unit navigation cells. Return
 // links are explicit so doors and warps can have different rules in each direction.
+// Arrival tiles lie outside the opposite trigger, preventing automatic return trips.
 export const NAVIGATION_PORTALS: NavigationPortal[] = [
   { id: 'shrine-enter', fromChunk: 'overworld-2-1', fromTile: { x: 20, z: 20 },
-    toChunk: 'dungeon', toTile: { x: 20, z: 6 }, traversalCost: 1,
+    toChunk: 'dungeon', toTile: { x: 20, z: 9 }, traversalCost: 1,
     traversableByAI: false, interactionRadius: 2 },
   { id: 'shrine-leave', fromChunk: 'dungeon', fromTile: { x: 20, z: 4 },
-    toChunk: 'overworld-2-1', toTile: { x: 20, z: 16 }, traversalCost: 1,
+    toChunk: 'overworld-2-1', toTile: { x: 20, z: 15 }, traversalCost: 1,
     traversableByAI: false, interactionRadius: 1.7 },
 ];
 

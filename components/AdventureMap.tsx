@@ -59,7 +59,7 @@ export default function AdventureMap({ expanded, onExpand, onClose }: MapProps) 
     : bossDefeated ? { ...world.chest, kind: 'chest', label: 'Ember chest', instruction: 'Open the chest in the northern chamber to claim the last ember.' }
       : !hasKey && !gateOpen ? { ...world.key, kind: 'key', label: 'Brass key', instruction: 'Find the brass key on the western pedestal.' }
         : !gateOpen ? { ...world.gate, kind: 'gate', label: 'Sealed gate', instruction: 'Carry the brass key to the gate between the two chambers.' }
-          : { x: bossX, z: bossZ, kind: 'boss', label: 'Hollow Guardian', instruction: 'Defeat the Guardian. Sidestep violet wisps, or return them with your sword.' };
+          : { x: bossX, z: bossZ, kind: 'boss', label: 'Hollow Guardian', instruction: 'Dodge amber lanes and violet circles. Strike after the lunge.' };
   const dialogId = useId();
   const headingId = useId();
   const trigger = useRef<HTMLButtonElement>(null);

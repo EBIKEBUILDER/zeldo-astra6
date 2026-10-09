@@ -1,10 +1,14 @@
 import type { SoundName } from './types';
+import type { MusicTrack } from './music';
+import { MusicPlayer } from './music-player';
 
 /** Small, entirely synthesized sound palette. Audio starts only after a gesture. */
 export class GameAudio {
   private context: AudioContext | null = null;
   private master: GainNode | null = null;
   private noiseBuffer: AudioBuffer | null = null;
+  private music: MusicPlayer | null = null;
+  private musicTrack: MusicTrack | null = null;
   private muted = false;
   private disposed = false;
 
@@ -28,11 +32,13 @@ export class GameAudio {
         this.noiseBuffer = this.context.createBuffer(1, this.context.sampleRate, this.context.sampleRate);
         const data = this.noiseBuffer.getChannelData(0);
         for (let index = 0; index < data.length; index++) data[index] = Math.random() * 2 - 1;
+        this.music = new MusicPlayer(this.context, this.master, this.noiseBuffer);
       }
       // Safari may also report an interrupted state after a phone call or tab switch.
       if (this.context.state !== 'running' && this.context.state !== 'closed') {
         void this.context.resume().catch(() => {});
       }
+      this.music?.setTrack(this.muted ? null : this.musicTrack);
     } catch {
       // Unsupported devices still get the complete playable game.
     }
@@ -45,6 +51,13 @@ export class GameAudio {
       this.master.gain.cancelScheduledValues(this.context.currentTime);
       this.master.gain.setTargetAtTime(muted ? 0 : 0.32, this.context.currentTime, 0.015);
     }
+    this.music?.setTrack(muted ? null : this.musicTrack);
+  }
+
+  setMusic(track: MusicTrack | null): void {
+    if (this.disposed || this.musicTrack === track) return;
+    this.musicTrack = track;
+    this.music?.setTrack(this.muted ? null : track);
   }
 
   private tone(
@@ -115,6 +128,15 @@ export class GameAudio {
         this.tone(170, 0.13, 'square', 0.2, 0, 55);
         this.tone(840, 0.07, 'triangle', 0.22);
         break;
+      case 'boss-windup':
+        this.tone(146.83, .38, 'triangle', .26, 0, 110);
+        this.tone(220, .18, 'sine', .18, .23);
+        this.noise(.22, .12, 430, 850);
+        break;
+      case 'boss-lunge':
+        this.noise(.28, .4, 1200, 240);
+        this.tone(164.81, .3, 'triangle', .3, 0, 55);
+        break;
       case 'ranged-charge':
         // A rising, three-beat breath gives the locked shot a recognizable cue.
         this.tone(196, .78, 'sine', .23, 0, 784);
@@ -138,6 +160,11 @@ export class GameAudio {
       case 'ranged-impact':
         this.tone(392, .17, 'triangle', .21, 0, 98);
         this.noise(.13, .24, 1500, 250);
+        break;
+      case 'ranged-explode':
+        this.tone(110, .48, 'sine', .4, 0, 37);
+        this.noise(.42, .42, 1700, 190);
+        this.tone(587.33, .32, 'triangle', .13, .025, 146.83);
         break;
       case 'death':
         this.tone(240, 0.28, 'triangle', 0.42, 0, 48);
@@ -184,6 +211,9 @@ export class GameAudio {
 
   dispose(): void {
     this.disposed = true;
+    this.music?.dispose();
+    this.music = null;
+    this.musicTrack = null;
     if (this.context && this.context.state !== 'closed') void this.context.close().catch(() => {});
     this.context = null;
     this.master = null;
